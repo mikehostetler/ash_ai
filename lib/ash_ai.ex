@@ -7,7 +7,7 @@ defmodule AshAi do
   Documentation for `AshAi`.
   """
 
-  alias LangChain.Chains.LLMChain
+  alias ReqLLM.Context
 
   defstruct []
 
@@ -246,6 +246,14 @@ defmodule AshAi do
           actor.
           """
         ],
+        model: [
+          type: :string,
+          default: "openai:gpt-4o-mini",
+          doc: """
+          The LLM model to use for chat. Format: "provider:model-name".
+          Examples: "openai:gpt-4o-mini", "anthropic:claude-haiku-4-5", "openai:gpt-4o".
+          """
+        ],
         on_tool_start: [
           type: {:fun, 1},
           required: false,
@@ -292,47 +300,53 @@ defmodule AshAi do
   def functions(opts) do
     opts
     |> exposed_tools()
-    |> Enum.map(&function/1)
+    |> Enum.map(fn tool_def ->
+      {tool, _callback} = tool(tool_def)
+      tool
+    end)
   end
 
-  def iex_chat(lang_chain, opts \\ []) do
+  def iex_chat(_lang_chain \\ nil, opts \\ []) do
     opts = Options.validate!(opts)
 
-    messages =
+    base_messages =
       case opts.system_prompt do
         :none ->
           []
 
         nil ->
           [
-            LangChain.Message.new_system!("""
+            Context.system("""
             You are a helpful assistant.
             Your purpose is to operate the application on behalf of the user.
             """)
           ]
 
-        system_prompt ->
-          [LangChain.Message.new_system!(system_prompt.(opts))]
+        system_prompt when is_function(system_prompt, 1) ->
+          [Context.system(system_prompt.(opts))]
       end
 
-    handler = %{
-      on_llm_new_delta: fn _chain, deltas ->
-        # we received a piece of data
-        for delta <- deltas do
-          IO.write(LangChain.MessageDelta.content_to_string(delta))
-        end
-      end,
-      on_message_processed: fn _chain, _data ->
-        # the message was assembled and is processed
-        IO.write("\n--\n")
-      end
-    }
+    {tools, tool_registry} = build_tools_and_registry(opts)
 
-    lang_chain
-    |> LLMChain.add_messages(messages)
-    |> setup_ash_ai(opts)
-    |> LLMChain.add_callback(handler)
-    |> run_loop(true)
+    run_loop(opts.model, base_messages, tools, tool_registry, opts, true)
+  end
+
+  defp build_tools_and_registry(opts) do
+    # Get tool definitions from DSL and convert to {tool, callback} tuples
+    tool_tuples =
+      opts
+      |> exposed_tools()
+      |> Enum.map(&tool/1)
+
+    # Separate tools and callbacks
+    {tools, callbacks} = Enum.unzip(tool_tuples)
+
+    # Build registry mapping tool name to callback function (function/2)
+    registry =
+      Enum.zip(tools, callbacks)
+      |> Enum.into(%{}, fn {tool, callback} -> {tool.name, callback} end)
+
+    {tools, registry}
   end
 
   @doc """
@@ -348,9 +362,10 @@ defmodule AshAi do
   def setup_ash_ai(lang_chain, opts) do
     tools = functions(opts)
 
+    # LangChain integration (deprecated - use iex_chat for ReqLLM integration)
     lang_chain
-    |> LLMChain.add_tools(tools)
-    |> LLMChain.update_custom_context(%{
+    |> LangChain.Chains.LLMChain.add_tools(tools)
+    |> LangChain.Chains.LLMChain.update_custom_context(%{
       actor: opts.actor,
       tenant: opts.tenant,
       context: opts.context,
@@ -361,26 +376,101 @@ defmodule AshAi do
     })
   end
 
-  defp run_loop(chain, first? \\ false) do
-    chain
-    |> LLMChain.run(mode: :while_needs_response)
-    |> case do
-      {:ok,
-       %LangChain.Chains.LLMChain{
-         last_message: %{content: content}
-       } = new_chain} ->
-        if !first? && !Map.get(new_chain.llm, :stream) do
-          IO.puts(content)
+  defp run_loop(model, messages, tools, registry, opts, _first? \\ false) do
+    {:ok, response} = ReqLLM.stream_text(model, messages, tools: tools)
+
+    acc = %{text: "", tool_calls: []}
+
+    acc =
+      response.stream
+      |> Enum.reduce(acc, fn chunk, acc ->
+        case chunk.type do
+          :content ->
+            text = chunk.text || ""
+            IO.write(text)
+            %{acc | text: acc.text <> text}
+
+          :tool_call ->
+            tc = %{id: chunk.id, name: chunk.name, arguments: chunk.arguments}
+            %{acc | tool_calls: acc.tool_calls ++ [tc]}
+
+          _ ->
+            acc
         end
+      end)
+
+    cond do
+      acc.tool_calls != [] ->
+        assistant_with_tools =
+          Context.assistant(%{
+            tool_calls:
+              Enum.map(acc.tool_calls, fn tc ->
+                %{
+                  id: tc.id,
+                  type: "function",
+                  function: %{name: tc.name, arguments: tc.arguments}
+                }
+              end)
+          })
+
+        messages = messages ++ [assistant_with_tools]
+
+        ctx = %{
+          actor: opts.actor,
+          tenant: opts.tenant,
+          context: opts.context || %{},
+          tool_callbacks: %{on_tool_start: opts.on_tool_start, on_tool_end: opts.on_tool_end}
+        }
+
+        messages =
+          Enum.reduce(acc.tool_calls, messages, fn tc, msgs ->
+            fun = Map.get(registry, tc.name)
+
+            if is_nil(fun) do
+              msgs ++
+                [
+                  Context.tool_result(tc.id, Jason.encode!(%{error: "Unknown tool: #{tc.name}"}))
+                ]
+            else
+              args =
+                case tc.arguments do
+                  s when is_binary(s) -> Jason.decode!(s)
+                  m -> m
+                end
+
+              result =
+                try do
+                  fun.(args, ctx)
+                rescue
+                  e ->
+                    {:error, Jason.encode!(%{error: Exception.message(e)})}
+                end
+
+              content =
+                case result do
+                  {:ok, content, _raw} -> content
+                  {:error, content} -> content
+                end
+
+              msgs ++ [Context.tool_result(tc.id, content)]
+            end
+          end)
+
+        run_loop(model, messages, tools, registry, opts, false)
+
+      true ->
+        messages =
+          if acc.text != "" do
+            messages ++ [Context.assistant(acc.text)]
+          else
+            messages
+          end
+
+        IO.write("\n")
 
         user_message = get_user_message()
-
-        new_chain
-        |> LLMChain.add_messages([LangChain.Message.new_user!(user_message)])
-        |> run_loop()
-
-      {:error, _new_chain, error} ->
-        raise "Something went wrong:\n #{Exception.format(:error, error)}"
+        messages = messages ++ [Context.user(user_message)]
+        run_loop(model, messages, tools, registry, opts, false)
     end
   end
 
@@ -451,14 +541,16 @@ defmodule AshAi do
     |> Jason.decode!()
   end
 
-  defp function(%Tool{
+  # Create a ReqLLM.Tool and callback from an AshAi.Tool DSL entity
+  # Returns {tool, callback} tuple where callback is function/2
+  defp tool(%Tool{
          name: name,
          domain: domain,
          resource: resource,
          action: action,
          load: load,
          identity: identity,
-         async: async,
+         async: _async,
          description: description,
          action_parameters: action_parameters
        }) do
@@ -472,15 +564,12 @@ defmodule AshAi do
 
     parameter_schema = parameter_schema(domain, resource, action, action_parameters)
 
-    LangChain.Function.new!(%{
-      name: name,
-      description: description,
-      parameters_schema: parameter_schema,
-      strict: true,
-      async: async,
-      function: fn arguments, context ->
-        # Handle nil arguments from LangChain/MCP clients
-        arguments = arguments || %{}
+    # Create the callback as a function/2 that we'll store directly
+    # ReqLLM.Tool requires function/1, but we need access to context
+    # So we return the function/2 directly and let build_tools_and_registry handle it
+    callback_fn = fn arguments, context ->
+      # Handle nil arguments from LangChain/MCP clients
+      arguments = arguments || %{}
 
         actor = context[:actor]
         tenant = context[:tenant]
@@ -767,8 +856,21 @@ defmodule AshAi do
 
         result
       end
-    })
+
+    # Return both the ReqLLM.Tool and our actual callback
+    # ReqLLM.Tool requires function/1, so we provide a stub that won't be called
+    # (our run_loop uses the registry callback directly which is function/2)
+    tool = ReqLLM.Tool.new!(
+      name: name,
+      description: description,
+      parameter_schema: parameter_schema,
+      callback: fn _args -> {:ok, "stub - should not be called"} end
+    )
+
+    {tool, callback_fn}
   end
+
+
 
   defp identity_filter(false, _resource, _arguments) do
     nil
