@@ -8,11 +8,12 @@ defmodule AshAi.EmbeddingModel do
   """
 
   @type opts :: Keyword.t()
+  @type vector :: [float()]
 
   @doc "The dimensions of generated embeddings"
   @callback dimensions(opts) :: pos_integer()
   @doc "Generate embeddings for the given list of strings"
-  @callback generate([String.t()], opts) :: {:ok, [binary()]} | {:error, term()}
+  @callback generate([String.t()], opts) :: {:ok, [vector()]} | {:error, term()}
 
   defmacro __using__(_) do
     quote do
