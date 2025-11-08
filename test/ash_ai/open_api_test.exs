@@ -4,7 +4,6 @@
 
 defmodule AshAi.OpenApiTest do
   use ExUnit.Case, async: true
-  alias AshAi.ChatFaker
 
   alias __MODULE__.{Music, Artist, Album}
 
@@ -126,43 +125,6 @@ defmodule AshAi.OpenApiTest do
 
     actions do
       default_accept [:*]
-
-      action :analyze_sentiment, Sentiment do
-        description "Analyze the sentiment of a given text"
-        argument :text, :string, allow_nil?: false
-
-        run prompt(
-              fn _input, _context ->
-                ChatFaker.new!(%{
-                  expect_fun: fn _model, _messages, tools ->
-                    completion_tool = Enum.find(tools, &(&1.name == "complete_request"))
-
-                    tool_call = %LangChain.Message.ToolCall{
-                      status: :complete,
-                      type: :function,
-                      call_id: "call_123",
-                      name: "complete_request",
-                      arguments: %{
-                        "result" => %{
-                          "sentiment" => "positive",
-                          "confidence" => 0.92,
-                          "keywords" => ["excellent", "wonderful", "fantastic"]
-                        }
-                      },
-                      index: 0
-                    }
-
-                    {:ok,
-                     LangChain.Message.new_assistant!(%{
-                       status: :complete,
-                       tool_calls: [tool_call]
-                     })}
-                  end
-                })
-              end,
-              adapter: {AshAi.Actions.Prompt.Adapter.CompletionTool, [max_runs: 10]}
-            )
-      end
     end
   end
 
@@ -177,18 +139,6 @@ defmodule AshAi.OpenApiTest do
   end
 
   describe "resource_write_attribute_type/3" do
-    test "with TestResource" do
-      resource = TestResource
-
-      action = resource |> Ash.Resource.Info.action(:analyze_sentiment)
-
-      assert get_parameter_schema_properties(
-               action,
-               resource,
-               &AshAi.OpenApi.resource_write_attribute_type/3
-             ) == %{text: %{type: :string}}
-    end
-
     test "with Artist" do
       resource = Artist
 

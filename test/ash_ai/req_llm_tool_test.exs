@@ -59,13 +59,13 @@ defmodule AshAi.ReqLLMToolTest do
 
       assert tool.name == "read_users"
       assert tool.description =~ "read"
-      
+
       # Check parameter schema has filter, sort, limit, offset
       schema = tool.parameter_schema
       assert is_map(schema)
       assert Map.has_key?(schema, "type")
       assert schema["type"] == "object"
-      
+
       properties = schema["properties"]
       assert Map.has_key?(properties, "filter")
       assert Map.has_key?(properties, "sort")
@@ -100,7 +100,7 @@ defmodule AshAi.ReqLLMToolTest do
       # Should return success tuple
       assert {:ok, json_string, _raw_result} = result
       assert is_binary(json_string)
-      
+
       # Verify JSON can be decoded
       assert {:ok, decoded} = Jason.decode(json_string)
       assert decoded["name"] == "Test User"
@@ -130,7 +130,7 @@ defmodule AshAi.ReqLLMToolTest do
       # Should return error tuple
       assert {:error, error_json} = result
       assert is_binary(error_json)
-      
+
       # Verify error JSON can be decoded
       assert {:ok, _decoded_error} = Jason.decode(error_json)
     end
@@ -139,7 +139,7 @@ defmodule AshAi.ReqLLMToolTest do
   describe "tool callbacks" do
     test "on_tool_start callback is invoked" do
       test_pid = self()
-      
+
       on_tool_start = fn event ->
         send(test_pid, {:tool_start, event})
       end
@@ -149,10 +149,11 @@ defmodule AshAi.ReqLLMToolTest do
         tools: [:create_user],
         on_tool_start: on_tool_start
       ]
-      
+
       [tool] = AshAi.functions(opts)
 
       args = %{"input" => %{"name" => "Test", "email" => "test@test.com"}}
+
       context = %{
         actor: nil,
         tenant: nil,
@@ -168,7 +169,7 @@ defmodule AshAi.ReqLLMToolTest do
 
     test "on_tool_end callback is invoked" do
       test_pid = self()
-      
+
       on_tool_end = fn event ->
         send(test_pid, {:tool_end, event})
       end
@@ -178,10 +179,11 @@ defmodule AshAi.ReqLLMToolTest do
         tools: [:create_user],
         on_tool_end: on_tool_end
       ]
-      
+
       [tool] = AshAi.functions(opts)
 
       args = %{"input" => %{"name" => "Test", "email" => "test@test.com"}}
+
       context = %{
         actor: nil,
         tenant: nil,
@@ -192,7 +194,8 @@ defmodule AshAi.ReqLLMToolTest do
       tool.callback.(args, context)
 
       # Verify callback was called
-      assert_receive {:tool_end, %AshAi.ToolEndEvent{tool_name: "create_user", result: {:ok, _, _}}}
+      assert_receive {:tool_end,
+                      %AshAi.ToolEndEvent{tool_name: "create_user", result: {:ok, _, _}}}
     end
   end
 end

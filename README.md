@@ -254,14 +254,13 @@ action :analyze_sentiment, :atom do
   end
 
   run prompt(
-    LangChain.ChatModels.ChatOpenAI.new!(%{ model: "gpt-4o"}),
+    "openai:gpt-4o",
     # setting `tools: true` allows it to use all exposed tools in your app
     tools: true
     # alternatively you can restrict it to only a set of tools
     # tools: [:list, :of, :tool, :names]
     # provide an optional prompt, which is an EEx template
-     # prompt: "Analyze the sentiment of the following text: <%= @input.arguments.description %>",
-    # adapter: {Adapter, [some: :opt]}
+     # prompt: "Analyze the sentiment of the following text: <%= @input.arguments.description %>"
   )
 end
 ```
@@ -288,24 +287,32 @@ action :parse_job, JobListing do
   argument :raw_content, :string, allow_nil?: false
 
   run prompt(
-    LangChain.ChatModels.ChatOpenAI.new!(%{model: "gpt-4o-mini"}),
+    "openai:gpt-4o-mini",
     prompt: "Parse this job listing: <%= @input.arguments.raw_content %>",
     tools: false
   )
 end
 ```
 
-## Adapters
+## Model Configuration
 
-Adapters are used to determine how a given LLM fulfills a prompt-backed action. The adapter is guessed automatically from the model where possible.
-See `AshAi.Actions.Prompt.Adapter` for more information.
+AshAi uses [ReqLLM](https://github.com/agentjido/req_llm) for LLM interactions. Models are specified as strings in the format `"provider:model_name"`:
 
-### Setting up LangChain
+```elixir
+# OpenAI
+run prompt("openai:gpt-4o", tools: true)
 
-For any langchain models you use, you will need to configure them. See https://hexdocs.pm/langchain/ for more information.
+# Anthropic
+run prompt("anthropic:claude-haiku-4-5", tools: true)
 
-For AshAI Specific changes to use different models:
-- [Google Gemini 2.5](/documentation/models/gemini.md)
+# Google
+run prompt("google:gemini-2.0-flash-exp", tools: false)
+
+# OpenRouter
+run prompt("openrouter:anthropic/claude-3.5-sonnet", tools: true)
+```
+
+For provider configuration (API keys, endpoints), see the [ReqLLM documentation](https://hexdocs.pm/req_llm).
 
 ## Vectorization
 
