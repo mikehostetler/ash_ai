@@ -454,57 +454,93 @@ end
 ### Embedding Models
 
 Embedding models are modules that are in charge of defining what the dimensions
-are of a given vector and how to generate one. This example uses `Req` to
-generate embeddings using `OpenAi`. To use it, you'd need to install `req`
-(`mix igniter.install req`).
+are of a given vector and how to generate one.
+
+#### Using ReqLLM (Recommended)
+
+AshAi provides a built-in embedding model that uses `ReqLLM` to generate embeddings
+from various providers (OpenAI, Google, Cohere, Voyage, etc.). To use it, install `req_llm`:
+
+```bash
+mix igniter.install req_llm
+```
+
+Then configure it in your resource:
 
 ```elixir
-defmodule Tunez.OpenAIEmbeddingModel do
+vectorize do
+  embedding_model {AshAi.EmbeddingModels.ReqLLM,
+    model: "openai:text-embedding-3-small",
+    dimensions: 1536,
+    req_opts: [api_key: System.get_env("OPENAI_API_KEY")]
+  }
+  
+  # ... rest of vectorize config
+end
+```
+
+**Common model configurations:**
+
+```elixir
+# OpenAI text-embedding-3-small (1536 dimensions)
+embedding_model {AshAi.EmbeddingModels.ReqLLM,
+  model: "openai:text-embedding-3-small",
+  dimensions: 1536
+}
+
+# OpenAI text-embedding-3-large (3072 dimensions)
+embedding_model {AshAi.EmbeddingModels.ReqLLM,
+  model: "openai:text-embedding-3-large",
+  dimensions: 3072
+}
+
+# Google Gemini (768 or 3072 dimensions)
+embedding_model {AshAi.EmbeddingModels.ReqLLM,
+  model: "google:text-embedding-004",
+  dimensions: 768
+}
+
+# Cohere (1024 dimensions)
+embedding_model {AshAi.EmbeddingModels.ReqLLM,
+  model: "cohere:embed-english-v3.0",
+  dimensions: 1024
+}
+```
+
+**Options:**
+
+- `:model` (required) - ReqLLM model identifier (e.g., "openai:text-embedding-3-small")
+- `:dimensions` (required) - Vector dimensions for the model
+- `:req_opts` (optional) - Additional options passed to ReqLLM (e.g., API keys, timeouts)
+- `:max_batch_size` (optional) - Maximum batch size for chunking large requests (default: 100)
+
+#### Custom Embedding Models
+
+You can also create custom embedding models by implementing the `AshAi.EmbeddingModel` behaviour:
+
+```elixir
+defmodule MyApp.CustomEmbeddingModel do
   use AshAi.EmbeddingModel
 
   @impl true
-  def dimensions(_opts), do: 3072
+  def dimensions(_opts), do: 1536
 
   @impl true
-  def generate(texts, _opts) do
-    api_key = System.fetch_env!("OPEN_AI_API_KEY")
-
-    headers = [
-      {"Authorization", "Bearer #{api_key}"},
-      {"Content-Type", "application/json"}
-    ]
-
-    body = %{
-      "input" => texts,
-      "model" => "text-embedding-3-large"
-    }
-
-    response =
-      Req.post!("https://api.openai.com/v1/embeddings",
-        json: body,
-        headers: headers
-      )
-
-    case response.status do
-      200 ->
-        response.body["data"]
-        |> Enum.map(fn %{"embedding" => embedding} -> embedding end)
-        |> then(&{:ok, &1})
-
-      _status ->
-        {:error, response.body}
-    end
+  def generate(texts, opts) do
+    # Your custom implementation
+    # Must return {:ok, [vector]} | {:error, term()}
+    # where vector is a list of floats
   end
 end
 ```
 
-Opts can be used to make embedding models that are dynamic depending on the resource, i.e
+Opts can be used to make embedding models that are dynamic depending on the resource:
 
 ```elixir
-embedding_model {MyApp.OpenAiEmbeddingModel, model: "a-specific-model"}
+embedding_model {MyApp.CustomEmbeddingModel, custom_option: "value"}
 ```
 
-Those opts are available in the `_opts` argument to functions on your embedding model
+Those opts are available in the `opts` argument to both `dimensions/1` and `generate/2` functions
 
 ## Using the vectors
 
@@ -515,7 +551,12 @@ read :search do
   argument :query, :string, allow_nil?: false
 
   prepare before_action(fn query, context ->
-    case YourEmbeddingModel.generate([query.arguments.query], []) do
+    # Use the same embedding model configured in your resource
+    case AshAi.EmbeddingModels.ReqLLM.generate(
+      [query.arguments.query],
+      model: "openai:text-embedding-3-small",
+      dimensions: 1536
+    ) do
       {:ok, [search_vector]} ->
         Ash.Query.filter(
           query,

@@ -6,6 +6,16 @@ defmodule AshAi.ReqLLMToolTest do
   use ExUnit.Case, async: true
   alias __MODULE__.{TestDomain, TestResource}
 
+  # Helper to get tool tuples (ReqLLM.Tool and callback function) from opts
+  defp get_tool_tuples(opts) do
+    # Ensure we have actions specified
+    opts = Keyword.put_new(opts, :actions, [{TestResource, :*}])
+
+    opts
+    |> AshAi.exposed_tools()
+    |> Enum.map(&AshAi.tool/1)
+  end
+
   defmodule TestResource do
     use Ash.Resource, domain: TestDomain, data_layer: Ash.DataLayer.Ets
 
@@ -49,13 +59,14 @@ defmodule AshAi.ReqLLMToolTest do
         assert is_binary(tool.name)
         assert is_binary(tool.description)
         assert is_map(tool.parameter_schema)
-        assert is_function(tool.callback, 2)
+        # tool.callback is a 1-arity stub, real callbacks are in the registry
+        assert is_function(tool.callback, 1)
       end)
     end
 
     test "tool has correct structure for read action" do
-      opts = [otp_app: :ash_ai, tools: [:read_users]]
-      [tool] = AshAi.functions(opts)
+      opts = [tools: [:read_users]]
+      [{tool, _callback}] = get_tool_tuples(opts)
 
       assert tool.name == "read_users"
       assert tool.description =~ "read"
@@ -74,8 +85,12 @@ defmodule AshAi.ReqLLMToolTest do
     end
 
     test "tool callback is executable" do
-      opts = [otp_app: :ash_ai, tools: [:create_user]]
-      [tool] = AshAi.functions(opts)
+      opts = [tools: [:create_user]]
+      [{tool, callback}] = get_tool_tuples(opts)
+
+      # Verify tool structure
+      assert %ReqLLM.Tool{} = tool
+      assert tool.name == "create_user"
 
       # Create test data
       user_args = %{
@@ -94,8 +109,8 @@ defmodule AshAi.ReqLLMToolTest do
         tool_callbacks: %{}
       }
 
-      # Execute the tool callback
-      result = tool.callback.(user_args, context)
+      # Execute the real callback (function/2)
+      result = callback.(user_args, context)
 
       # Should return success tuple
       assert {:ok, json_string, _raw_result} = result
@@ -109,8 +124,8 @@ defmodule AshAi.ReqLLMToolTest do
     end
 
     test "tool callback handles errors gracefully" do
-      opts = [otp_app: :ash_ai, tools: [:read_users]]
-      [tool] = AshAi.functions(opts)
+      opts = [tools: [:read_users]]
+      [{_tool, callback}] = get_tool_tuples(opts)
 
       # Invalid arguments (filter with invalid structure)
       invalid_args = %{
@@ -124,8 +139,8 @@ defmodule AshAi.ReqLLMToolTest do
         tool_callbacks: %{}
       }
 
-      # Execute the tool callback
-      result = tool.callback.(invalid_args, context)
+      # Execute the real callback (function/2)
+      result = callback.(invalid_args, context)
 
       # Should return error tuple
       assert {:error, error_json} = result
@@ -144,13 +159,8 @@ defmodule AshAi.ReqLLMToolTest do
         send(test_pid, {:tool_start, event})
       end
 
-      opts = [
-        otp_app: :ash_ai,
-        tools: [:create_user],
-        on_tool_start: on_tool_start
-      ]
-
-      [tool] = AshAi.functions(opts)
+      opts = [tools: [:create_user], on_tool_start: on_tool_start]
+      [{_tool, callback}] = get_tool_tuples(opts)
 
       args = %{"input" => %{"name" => "Test", "email" => "test@test.com"}}
 
@@ -161,7 +171,7 @@ defmodule AshAi.ReqLLMToolTest do
         tool_callbacks: %{on_tool_start: on_tool_start}
       }
 
-      tool.callback.(args, context)
+      callback.(args, context)
 
       # Verify callback was called
       assert_receive {:tool_start, %AshAi.ToolStartEvent{tool_name: "create_user"}}
@@ -174,13 +184,8 @@ defmodule AshAi.ReqLLMToolTest do
         send(test_pid, {:tool_end, event})
       end
 
-      opts = [
-        otp_app: :ash_ai,
-        tools: [:create_user],
-        on_tool_end: on_tool_end
-      ]
-
-      [tool] = AshAi.functions(opts)
+      opts = [tools: [:create_user], on_tool_end: on_tool_end]
+      [{_tool, callback}] = get_tool_tuples(opts)
 
       args = %{"input" => %{"name" => "Test", "email" => "test@test.com"}}
 
@@ -191,7 +196,7 @@ defmodule AshAi.ReqLLMToolTest do
         tool_callbacks: %{on_tool_end: on_tool_end}
       }
 
-      tool.callback.(args, context)
+      callback.(args, context)
 
       # Verify callback was called
       assert_receive {:tool_end,

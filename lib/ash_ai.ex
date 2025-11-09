@@ -293,6 +293,22 @@ defmodule AshAi do
           end
           ```
           """
+        ],
+        req_llm: [
+          type: :atom,
+          default: ReqLLM,
+          doc: """
+          The ReqLLM module to use for LLM operations. Defaults to `ReqLLM`.
+
+          This is primarily intended for testing purposes, allowing you to inject
+          a mock ReqLLM implementation to control responses and validate behavior
+          without making actual API calls.
+
+          Example for testing:
+          ```
+          iex_chat(nil, req_llm: FakeReqLLM, ...)
+          ```
+          """
         ]
       ]
   end
@@ -376,8 +392,9 @@ defmodule AshAi do
     })
   end
 
-  defp run_loop(model, messages, tools, registry, opts, _first? \\ false) do
-    {:ok, response} = ReqLLM.stream_text(model, messages, tools: tools)
+  defp run_loop(model, messages, tools, registry, opts, _first?) do
+    req_llm = opts.req_llm
+    {:ok, response} = req_llm.stream_text(model, messages, tools: tools)
 
     acc = %{text: "", tool_calls: []}
 
@@ -543,17 +560,18 @@ defmodule AshAi do
 
   # Create a ReqLLM.Tool and callback from an AshAi.Tool DSL entity
   # Returns {tool, callback} tuple where callback is function/2
-  defp tool(%Tool{
-         name: name,
-         domain: domain,
-         resource: resource,
-         action: action,
-         load: load,
-         identity: identity,
-         async: _async,
-         description: description,
-         action_parameters: action_parameters
-       }) do
+  @doc false
+  def tool(%Tool{
+        name: name,
+        domain: domain,
+        resource: resource,
+        action: action,
+        load: load,
+        identity: identity,
+        async: _async,
+        description: description,
+        action_parameters: action_parameters
+      }) do
     name = to_string(name)
 
     description =

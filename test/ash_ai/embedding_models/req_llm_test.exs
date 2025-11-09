@@ -144,16 +144,14 @@ defmodule AshAi.EmbeddingModels.ReqLLMTest do
     end
   end
 
-  # Helper to mock ReqLLM.embed/2 behavior
-  # In a real test, you'd use a mocking library or ReqLLM's test mode
-  defp with_mock_reqllm(_mock_fn, test_fn) do
-    # This is a placeholder - in practice you'd use:
-    # 1. Mox or similar mocking library
-    # 2. ReqLLM's built-in test mode if available
-    # 3. Set up a test adapter/plugin
-    #
-    # For now, we'll skip the actual mocking implementation
-    # and document what the tests should verify
-    test_fn.()
+  # Helper to mock ReqLLM.embed/3 behavior using process dictionary
+  defp with_mock_reqllm(mock_fn, test_fn) do
+    Process.put(:reqllm_mock, mock_fn)
+
+    try do
+      test_fn.()
+    after
+      Process.delete(:reqllm_mock)
+    end
   end
 end

@@ -70,7 +70,10 @@ defmodule AshAi.EmbeddingModels.ReqLLM do
   @impl true
   def dimensions(opts) do
     # Compile-time safe; no external calls allowed
-    Keyword.fetch!(opts, :dimensions)
+    case Keyword.fetch!(opts, :dimensions) do
+      nil -> raise KeyError, key: :dimensions, term: opts
+      dims -> dims
+    end
   end
 
   @impl true
@@ -95,8 +98,19 @@ defmodule AshAi.EmbeddingModels.ReqLLM do
   end
 
   defp call_reqllm(model, inputs, req_opts) do
-    unless function_exported?(ReqLLM, :embed, 2) do
-      {:error, "ReqLLM.embed/2 not found. Ensure ReqLLM is installed and up to date."}
+    # Check for test mode mock function
+    case Process.get(:reqllm_mock) do
+      nil ->
+        real_reqllm_call(model, inputs, req_opts)
+
+      mock_fn when is_function(mock_fn, 3) ->
+        mock_fn.(model, inputs, req_opts)
+    end
+  end
+
+  defp real_reqllm_call(model, inputs, req_opts) do
+    unless function_exported?(ReqLLM, :embed, 3) do
+      {:error, "ReqLLM.embed/3 not found. Ensure ReqLLM is installed and up to date."}
     else
       case ReqLLM.embed(model, inputs, req_opts) do
         {:ok, embeddings} when is_list(embeddings) ->

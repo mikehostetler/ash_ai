@@ -387,7 +387,7 @@ defmodule AshAi.Actions.Prompt do
       ReqLLM.Tool.new!(
         name: ash_func.name,
         description: ash_func.description || "",
-        parameter_schema: ash_func.parameters_schema,
+        parameter_schema: ash_func.parameter_schema,
         callback: fn args ->
           # Execute the AshAi function
           case ash_func.function.(args) do
