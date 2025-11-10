@@ -249,13 +249,12 @@ defmodule AshAi.Mcp.Server do
         tool_args = params["arguments"] || %{}
 
         opts =
-          opts
-          |> Keyword.update(
+          Keyword.update(
+            opts,
             :context,
             %{mcp_session_id: session_id},
             &Map.put(&1, :mcp_session_id, session_id)
           )
-          |> Keyword.put(:filter, fn tool -> tool.mcp == :tool end)
 
         {_tools, registry} = build_tools_and_registry(opts)
 
@@ -351,30 +350,7 @@ defmodule AshAi.Mcp.Server do
         opts
       end
 
-    opts =
-      opts
-      |> Keyword.take([:otp_app, :tools, :actor, :context, :tenant, :actions])
-      |> Keyword.update(
-        :context,
-        %{otp_app: opts[:otp_app]},
-        &Map.put(&1, :otp_app, opts[:otp_app])
-      )
-
-    # Get tool definitions from DSL and convert to {tool, callback} tuples
-    tool_tuples =
-      opts
-      |> AshAi.exposed_tools()
-      |> Enum.map(&AshAi.tool/1)
-
-    # Separate tools and callbacks
-    {tools, callbacks} = Enum.unzip(tool_tuples)
-
-    # Build registry mapping tool name to callback function (function/2)
-    registry =
-      Enum.zip(tools, callbacks)
-      |> Enum.into(%{}, fn {tool, callback} -> {tool.name, callback} end)
-
-    {tools, registry}
+    AshAi.Tools.build(opts)
   end
 
   @doc """
