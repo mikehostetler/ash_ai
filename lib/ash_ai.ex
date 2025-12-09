@@ -353,7 +353,7 @@ defmodule AshAi do
 
     {tools, tool_registry} = build_tools_and_registry(opts)
 
-    reqllm_run_loop(opts.model, base_messages, tools, tool_registry, opts, true)
+    run_loop(opts.model, base_messages, tools, tool_registry, opts, true)
   end
 
   @doc """
@@ -382,30 +382,7 @@ defmodule AshAi do
     })
   end
 
-  defp run_loop(chain, first? \\ false) do
-    chain
-    |> LLMChain.run(mode: :while_needs_response)
-    |> case do
-      {:ok,
-       %LangChain.Chains.LLMChain{
-         last_message: %{content: content}
-       } = new_chain} ->
-        if !first? && !Map.get(new_chain.llm, :stream) do
-          IO.puts(content)
-        end
-
-        user_message = get_user_message()
-
-        new_chain
-        |> LLMChain.add_messages([LangChain.Message.new_user!(user_message)])
-        |> run_loop()
-
-      {:error, _new_chain, error} ->
-        raise "Something went wrong:\n #{Exception.format(:error, error)}"
-    end
-  end
-
-  defp reqllm_run_loop(model, messages, tools, registry, opts, first?) do
+  defp run_loop(model, messages, tools, registry, opts, first?) do
     req_llm = opts.req_llm
     {:ok, response} = req_llm.stream_text(model, messages, tools: tools)
 
@@ -451,9 +428,9 @@ defmodule AshAi do
         tool_callbacks: %{on_tool_start: opts.on_tool_start, on_tool_end: opts.on_tool_end}
       }
 
-      messages = reqllm_run_tools(acc.tool_calls, messages, registry, ctx)
+      messages = run_tools(acc.tool_calls, messages, registry, ctx)
 
-      reqllm_run_loop(model, messages, tools, registry, opts, false)
+      run_loop(model, messages, tools, registry, opts, false)
     else
       messages =
         if acc.text != "" do
@@ -468,11 +445,11 @@ defmodule AshAi do
 
       user_message = get_user_message()
       messages = messages ++ [Context.user(user_message)]
-      reqllm_run_loop(model, messages, tools, registry, opts, false)
+      run_loop(model, messages, tools, registry, opts, false)
     end
   end
 
-  defp reqllm_run_tools(tool_calls, messages, registry, ctx) do
+  defp run_tools(tool_calls, messages, registry, ctx) do
     Enum.reduce(tool_calls, messages, fn tc, msgs ->
       fun = Map.get(registry, tc.name)
 
