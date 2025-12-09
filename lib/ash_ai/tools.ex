@@ -12,6 +12,18 @@ defmodule AshAi.Tools do
   alias AshAi.{Tool, ToolEndEvent, ToolStartEvent}
 
   @doc """
+  Returns the JSON Schema parameter schema for a tool definition.
+  """
+  def parameter_schema(%Tool{
+        domain: domain,
+        resource: resource,
+        action: action,
+        action_parameters: action_parameters
+      }) do
+    parameter_schema(domain, resource, action, action_parameters)
+  end
+
+  @doc """
   Converts a AshAi.Tool into a LangChain.Function
   """
   def to_function(

@@ -155,6 +155,7 @@ defmodule AshAi.MixProject do
       {:ash_json_api, "~> 1.4 and >= 1.4.27"},
       {:open_api_spex, "~> 3.0"},
       {:langchain, "~> 0.4"},
+      {:req_llm, "~> 1.0"},
       {:ash_postgres, "~> 2.5", optional: true},
       {:ash_oban, "~> 0.5", optional: true},
       {:ash_phoenix, "~> 2.0", optional: true},
