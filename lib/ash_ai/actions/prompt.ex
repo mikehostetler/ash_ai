@@ -133,20 +133,34 @@ defmodule AshAi.Actions.Prompt do
 
   defp build_json_schema(input) do
     if input.action.returns do
-      schema =
+      inner_schema =
         AshAi.OpenApi.resource_write_attribute_type(
           %{name: :result, type: input.action.returns, constraints: input.action.constraints},
           nil,
           :create
         )
 
-      if input.action.allow_nil? do
-        %{"anyOf" => [%{"type" => "null"}, schema]}
-      else
-        schema
-      end
+      result_schema =
+        if input.action.allow_nil? do
+          %{"anyOf" => [%{"type" => "null"}, inner_schema]}
+        else
+          inner_schema
+        end
+
+      %{
+        "type" => "object",
+        "properties" => %{
+          "result" => result_schema
+        },
+        "required" => ["result"],
+        "additionalProperties" => false
+      }
     else
-      %{"type" => "null"}
+      %{
+        "type" => "object",
+        "properties" => %{},
+        "additionalProperties" => false
+      }
     end
   end
 

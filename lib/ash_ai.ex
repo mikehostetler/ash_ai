@@ -5,6 +5,22 @@
 defmodule AshAi do
   @moduledoc """
   Documentation for `AshAi`.
+
+  AshAi provides AI capabilities for Ash applications, including:
+  - Tool exposure for LLM agents (LangChain and ReqLLM)
+  - Interactive IEx chat with tool calling
+  - MCP (Model Context Protocol) server support
+  - Vectorization for semantic search
+
+  ## Architecture
+
+  The tool functionality is organized into specialized modules:
+  - `AshAi.Tool.Schema` - Generates JSON schemas for tool parameters
+  - `AshAi.Tool.Execution` - Executes Ash actions from tool calls
+  - `AshAi.Tool.Errors` - Formats errors as JSON:API responses
+  - `AshAi.Tool.Builder` - Creates ReqLLM.Tool structs and callbacks
+  - `AshAi.Tools` - High-level API for tool discovery and building
+  - `AshAi.ToolLoop` - Manages LLM conversation loops with tools
   """
 
   alias LangChain.Chains.LLMChain
@@ -234,15 +250,60 @@ defmodule AshAi do
           The ReqLLM module to use for streaming. Defaults to ReqLLM.
           Can be overridden for testing with a mock module.
           """
+        ],
+        max_iterations: [
+          type: :pos_integer,
+          default: 10,
+          doc: """
+          Maximum number of iterations for tool calling loops.
+          Each iteration allows the LLM to make tool calls and receive results.
+          """
         ]
       ]
   end
 
+  # ============================================================================
+  # LangChain Integration
+  # ============================================================================
+
+  @doc """
+  Returns a list of LangChain.Function structs for the given options.
+  """
   def functions(opts) do
     opts
     |> exposed_tools()
     |> Enum.map(&AshAi.Tools.to_function/1)
   end
+
+  @doc """
+  Adds the requisite context and tool calls to allow an agent to interact with your app.
+  """
+  def setup_ash_ai(lang_chain, opts \\ [])
+
+  def setup_ash_ai(lang_chain, opts) when is_list(opts) do
+    opts = Options.validate!(opts)
+    setup_ash_ai(lang_chain, opts)
+  end
+
+  def setup_ash_ai(lang_chain, opts) do
+    tools = functions(opts)
+
+    lang_chain
+    |> LLMChain.add_tools(tools)
+    |> LLMChain.update_custom_context(%{
+      actor: opts.actor,
+      tenant: opts.tenant,
+      context: opts.context,
+      tool_callbacks: %{
+        on_tool_start: opts.on_tool_start,
+        on_tool_end: opts.on_tool_end
+      }
+    })
+  end
+
+  # ============================================================================
+  # ReqLLM Integration
+  # ============================================================================
 
   @doc """
   Returns a list of ReqLLM.Tool structs for the given options.
@@ -261,6 +322,8 @@ defmodule AshAi do
   @doc """
   Builds a ReqLLM.Tool and callback function from an AshAi.Tool definition.
 
+  Delegates to `AshAi.Tool.Builder.build/2`.
+
   Returns a tuple of `{ReqLLM.Tool, callback_fn}` where:
   - `ReqLLM.Tool` contains the tool schema for the LLM
   - `callback_fn` is a function/2 that takes (arguments, context) and executes the Ash action
@@ -271,45 +334,12 @@ defmodule AshAi do
       result = callback.(%{"input" => %{"name" => "foo"}}, %{actor: current_user})
   """
   def reqllm_tool(%Tool{} = tool_def) do
-    name = to_string(tool_def.name)
-
-    description =
-      String.trim(
-        tool_def.description || tool_def.action.description ||
-          "Call the #{tool_def.action.name} action on the #{inspect(tool_def.resource)} resource"
-      )
-
-    parameter_schema = AshAi.Tools.parameter_schema(tool_def)
-
-    callback_fn = fn arguments, context ->
-      AshAi.Tools.execute(tool_def, arguments, context)
-    end
-
-    tool =
-      ReqLLM.Tool.new!(
-        name: name,
-        description: description,
-        parameter_schema: parameter_schema,
-        callback: fn _args -> {:ok, "stub - should not be called"} end
-      )
-
-    {tool, callback_fn}
+    AshAi.Tool.Builder.build(tool_def)
   end
 
-  defp build_tools_and_registry(opts) do
-    tool_tuples =
-      opts
-      |> exposed_tools()
-      |> Enum.map(&reqllm_tool/1)
-
-    {tools, callbacks} = Enum.unzip(tool_tuples)
-
-    registry =
-      Enum.zip(tools, callbacks)
-      |> Enum.into(%{}, fn {tool, callback} -> {tool.name, callback} end)
-
-    {tools, registry}
-  end
+  # ============================================================================
+  # IEx Chat
+  # ============================================================================
 
   @doc """
   Interactive IEx chat using ReqLLM.
@@ -351,38 +381,12 @@ defmodule AshAi do
           [Context.system(system_prompt.(opts))]
       end
 
-    {tools, tool_registry} = build_tools_and_registry(opts)
+    {tools, tool_registry} = AshAi.Tools.build_tools_and_registry(opts)
 
-    run_loop(opts.model, base_messages, tools, tool_registry, opts, true)
+    run_iex_loop(opts.model, base_messages, tools, tool_registry, opts, true)
   end
 
-  @doc """
-  Adds the requisite context and tool calls to allow an agent to interact with your app.
-  """
-  def setup_ash_ai(lang_chain, opts \\ [])
-
-  def setup_ash_ai(lang_chain, opts) when is_list(opts) do
-    opts = Options.validate!(opts)
-    setup_ash_ai(lang_chain, opts)
-  end
-
-  def setup_ash_ai(lang_chain, opts) do
-    tools = functions(opts)
-
-    lang_chain
-    |> LLMChain.add_tools(tools)
-    |> LLMChain.update_custom_context(%{
-      actor: opts.actor,
-      tenant: opts.tenant,
-      context: opts.context,
-      tool_callbacks: %{
-        on_tool_start: opts.on_tool_start,
-        on_tool_end: opts.on_tool_end
-      }
-    })
-  end
-
-  defp run_loop(model, messages, tools, registry, opts, first?) do
+  defp run_iex_loop(model, messages, tools, registry, opts, first?) do
     req_llm = opts.req_llm
     {:ok, response} = req_llm.stream_text(model, messages, tools: tools)
 
@@ -428,9 +432,9 @@ defmodule AshAi do
         tool_callbacks: %{on_tool_start: opts.on_tool_start, on_tool_end: opts.on_tool_end}
       }
 
-      messages = run_tools(acc.tool_calls, messages, registry, ctx)
+      messages = run_iex_tools(acc.tool_calls, messages, registry, ctx)
 
-      run_loop(model, messages, tools, registry, opts, false)
+      run_iex_loop(model, messages, tools, registry, opts, false)
     else
       messages =
         if acc.text != "" do
@@ -445,11 +449,11 @@ defmodule AshAi do
 
       user_message = get_user_message()
       messages = messages ++ [Context.user(user_message)]
-      run_loop(model, messages, tools, registry, opts, false)
+      run_iex_loop(model, messages, tools, registry, opts, false)
     end
   end
 
-  defp run_tools(tool_calls, messages, registry, ctx) do
+  defp run_iex_tools(tool_calls, messages, registry, ctx) do
     Enum.reduce(tool_calls, messages, fn tc, msgs ->
       fun = Map.get(registry, tc.name)
 
@@ -489,6 +493,10 @@ defmodule AshAi do
       message -> message
     end
   end
+
+  # ============================================================================
+  # Error Handling
+  # ============================================================================
 
   def to_json_api_errors(domain, resource, errors, type) when is_list(errors) do
     Enum.flat_map(errors, &to_json_api_errors(domain, resource, &1, type))
@@ -624,8 +632,11 @@ defmodule AshAi do
     "/input/#{Enum.join(List.wrap(path) ++ [field], "/")}"
   end
 
-  @doc false
+  # ============================================================================
+  # MCP Resources
+  # ============================================================================
 
+  @doc false
   def exposed_mcp_resources(opts) when is_list(opts) do
     exposed_mcp_resources(Options.validate!(opts))
   end
@@ -673,7 +684,6 @@ defmodule AshAi do
   end
 
   defp valid_mcp_resource(mcp_resource, allowed_mcp_resources, allowed_actions, exclude_actions) do
-    # If mcp_resources filter is specified (including empty list), check membership
     passes_mcp_resources_filter =
       case allowed_mcp_resources do
         [:*] -> true
@@ -683,7 +693,6 @@ defmodule AshAi do
         list when is_list(list) -> Enum.member?(list, mcp_resource.name)
       end
 
-    # Check if actions filter is specified
     passes_actions_filter =
       if allowed_actions && allowed_actions != [] do
         Enum.any?(allowed_actions, fn
@@ -697,7 +706,6 @@ defmodule AshAi do
         true
       end
 
-    # Check if this is in the exclude list
     is_excluded =
       if exclude_actions && exclude_actions != [] do
         Enum.any?(exclude_actions, fn {resource, action} ->
@@ -709,6 +717,10 @@ defmodule AshAi do
 
     passes_mcp_resources_filter && passes_actions_filter && !is_excluded
   end
+
+  # ============================================================================
+  # Tool Discovery
+  # ============================================================================
 
   def exposed_tools(opts) when is_list(opts) do
     exposed_tools(Options.validate!(opts))
@@ -786,6 +798,10 @@ defmodule AshAi do
     )
   end
 
+  # ============================================================================
+  # Vectorization
+  # ============================================================================
+
   def has_vectorize_change?(%Ash.Changeset{} = changeset) do
     full_text_attrs =
       AshAi.Info.vectorize(changeset.resource) |> Enum.flat_map(& &1.used_attributes)
@@ -798,6 +814,10 @@ defmodule AshAi do
       Ash.Changeset.changing_attribute?(changeset, attr)
     end)
   end
+
+  # ============================================================================
+  # Private Helpers
+  # ============================================================================
 
   defp can?(actor, domain, resource, action, tenant) do
     if Enum.empty?(Ash.Resource.Info.authorizers(resource)) do

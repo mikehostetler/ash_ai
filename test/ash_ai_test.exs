@@ -235,6 +235,7 @@ defmodule AshAiTest do
 
       assert function.parameters_schema["properties"]["input"] == %{
                "type" => "object",
+               "additionalProperties" => false,
                "properties" => %{
                  "id" => %{"type" => "string", "format" => "uuid"},
                  "name" => %{"type" => "string"}
@@ -269,6 +270,7 @@ defmodule AshAiTest do
 
       assert function.parameters_schema["properties"]["input"] == %{
                "type" => "object",
+               "additionalProperties" => false,
                "properties" => %{
                  "id" => %{"type" => "string", "format" => "uuid"},
                  "name" => %{"type" => "string"}
@@ -328,6 +330,7 @@ defmodule AshAiTest do
 
       assert function.parameters_schema["properties"]["input"] == %{
                "type" => "object",
+               "additionalProperties" => false,
                "properties" => %{"name" => %{"type" => "string"}},
                "required" => ["name"]
              }
