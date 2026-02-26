@@ -255,7 +255,11 @@ defmodule AshAiTest do
       assert function.description == "Say hello"
 
       assert function.parameters_schema["properties"]["input"]["type"] == "object"
-      assert function.parameters_schema["properties"]["input"]["properties"]["name"] == %{"type" => "string"}
+
+      assert function.parameters_schema["properties"]["input"]["properties"]["name"] == %{
+               "type" => "string"
+             }
+
       assert function.parameters_schema["properties"]["input"]["required"] == ["name"]
 
       tool_call = tool_call(tool_name, %{"input" => %{"name" => "Chat Faker"}})

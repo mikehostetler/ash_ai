@@ -85,6 +85,11 @@ defmodule AshAi.Dsl do
       default: %{},
       doc:
         "Optional metadata map for tool integrations. Supports provider-specific extensions like OpenAI metadata. Keys and values should be strings to comply with JSON-RPC serialization."
+    ],
+    ui: [
+      type: {:or, [:atom, :string]},
+      doc:
+        "The `mcp_ui_resource` name (atom) or a `ui://` URI string for MCP Apps. Shortcut for setting `_meta.ui.resourceUri`. When an atom is given, the URI is resolved from the matching `mcp_ui_resource` declaration."
     ]
   ]
 
@@ -198,7 +203,8 @@ defmodule AshAi.Dsl do
       ~s(tool :list_artists, Artist, :read),
       ~s(tool :create_artist, Artist, :create, description: "Create a new artist"),
       ~s(tool :update_artist, Artist, :update, identity: :id, load: [:albums]),
-      ~s|tool :get_board, Board, :read, _meta: %{"openai/outputTemplate" => "ui://widget/kanban-board.html", "openai/toolInvocation/invoking" => "Preparing the board…", "openai/toolInvocation/invoked" => "Board ready."}|
+      ~s|tool :get_board, Board, :read, _meta: %{"openai/outputTemplate" => "ui://widget/kanban-board.html", "openai/toolInvocation/invoking" => "Preparing the board…", "openai/toolInvocation/invoked" => "Board ready."}|,
+      ~s(tool :list_artists, Artist, :read, ui: "ui://artists/list.html")
     ],
     target: AshAi.Tool,
     schema: @tool_schema,
@@ -213,6 +219,76 @@ defmodule AshAi.Dsl do
     entities: [
       @tool
     ]
+  }
+
+  @mcp_ui_resource_schema [
+    name: [type: :atom, required: true],
+    uri: [
+      type: :string,
+      required: true,
+      doc: "The `ui://` URI for this resource."
+    ],
+    html_path: [
+      type: :string,
+      required: true,
+      doc: "Path to the HTML file on disk. Read at request time."
+    ],
+    title: [
+      type: :string,
+      doc: "A short, human-readable title. Defaults to the resource name."
+    ],
+    description: [
+      type: :string,
+      doc: "A description of the UI resource."
+    ],
+    csp: [
+      type: :keyword_list,
+      keys: [
+        connect_domains: [type: {:list, :string}],
+        resource_domains: [type: {:list, :string}],
+        frame_domains: [type: {:list, :string}],
+        base_uri_domains: [type: {:list, :string}]
+      ],
+      doc: "Content Security Policy configuration."
+    ],
+    permissions: [
+      type: :keyword_list,
+      keys: [
+        camera: [type: :boolean],
+        microphone: [type: :boolean],
+        geolocation: [type: :boolean],
+        clipboard_write: [type: :boolean]
+      ],
+      doc: "Browser permissions to request for the sandboxed iframe."
+    ],
+    domain: [
+      type: {:or, [:atom, :string]},
+      default: :auto,
+      doc:
+        "Domain for the view's sandbox origin. Defaults to `:auto`, which computes a Claude-compatible domain from the server URL at request time (see `AshAi.Mcp.Server.sandbox_domain/1`). Set to a string to override, or `nil` to omit."
+    ],
+    prefers_border: [
+      type: :boolean,
+      doc: "Whether the app prefers a visible border and background from the host."
+    ]
+  ]
+
+  @mcp_ui_resource %Spark.Dsl.Entity{
+    name: :mcp_ui_resource,
+    describe: """
+    A UI resource for MCP Apps — serves a static HTML file that is rendered in a sandboxed
+    iframe by MCP hosts (like Claude Desktop). Link tools to UI resources using the tool's
+    `ui:` option or `_meta.ui.resourceUri`.
+
+    See [MCP Apps spec](https://modelcontextprotocol.io/specification/2025-11-25).
+    """,
+    examples: [
+      ~s(mcp_ui_resource :artist_viewer, "ui://artists/viewer.html", html_path: "priv/mcp_apps/artist_viewer.html"),
+      ~s(mcp_ui_resource :artist_dashboard, "ui://artists/dashboard.html", html_path: "priv/mcp_apps/artist_dashboard.html", csp: [connect_domains: ["api.example.com"]])
+    ],
+    target: AshAi.McpUiResource,
+    schema: @mcp_ui_resource_schema,
+    args: [:name, :uri]
   }
 
   @mcp_resource %Spark.Dsl.Entity{
@@ -238,7 +314,8 @@ defmodule AshAi.Dsl do
   @mcp_resources %Spark.Dsl.Section{
     name: :mcp_resources,
     entities: [
-      @mcp_resource
+      @mcp_resource,
+      @mcp_ui_resource
     ]
   }
 

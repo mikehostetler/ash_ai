@@ -16,7 +16,7 @@ defmodule AshAi do
   use Spark.Dsl.Extension,
     sections: AshAi.Dsl.sections(),
     imports: [AshAi.Actions],
-    transformers: [AshAi.Transformers.Vectorize],
+    transformers: [AshAi.Transformers.Vectorize, AshAi.Transformers.McpApps],
     verifiers: [AshAi.Verifiers.McpResourceActionsReturnString]
 
   defmodule Tool do
@@ -33,6 +33,7 @@ defmodule AshAi do
       :action_parameters,
       :arguments,
       :_meta,
+      :ui,
       __spark_metadata__: nil
     ]
 
@@ -116,6 +117,63 @@ defmodule AshAi do
       :mime_type,
       __spark_metadata__: nil
     ]
+  end
+
+  defmodule McpUiResource do
+    @moduledoc """
+    A UI resource for MCP Apps (Model Context Protocol Apps extension).
+
+    UI resources serve static HTML files that are rendered in sandboxed iframes by MCP hosts
+    (like Claude Desktop). They are linked to tools via `_meta.ui.resourceUri` and provide
+    interactive interfaces for tool results.
+
+    ## Example
+
+        mcp_resources do
+          mcp_ui_resource :estimates_list, "ui://estimates/list.html",
+            html_path: "priv/mcp_apps/estimates.html"
+
+          mcp_ui_resource :dashboard, "ui://dashboard.html",
+            html_path: "priv/mcp_apps/dashboard.html",
+            csp: [connect_domains: ["api.example.com"]],
+            permissions: [camera: true]
+        end
+
+    The HTML file at `html_path` is read at request time and returned with MIME type
+    `text/html;profile=mcp-app`.
+
+    See [MCP Apps spec](https://modelcontextprotocol.io/specification/2025-11-25).
+    """
+
+    @mime_type "text/html;profile=mcp-app"
+
+    @type t :: %__MODULE__{
+            name: atom(),
+            uri: String.t(),
+            html_path: String.t(),
+            title: String.t() | nil,
+            description: String.t() | nil,
+            csp: keyword() | nil,
+            permissions: keyword() | nil,
+            domain: :auto | String.t() | nil,
+            prefers_border: boolean() | nil
+          }
+
+    defstruct [
+      :name,
+      :uri,
+      :html_path,
+      :title,
+      :description,
+      :csp,
+      :permissions,
+      :domain,
+      :prefers_border,
+      __spark_metadata__: nil
+    ]
+
+    @doc "Returns the fixed MIME type for MCP App UI resources."
+    def mime_type, do: @mime_type
   end
 
   defmodule FullText do
@@ -497,36 +555,16 @@ defmodule AshAi do
 
   @doc false
 
-  def exposed_mcp_resources(opts) when is_list(opts) do
-    exposed_mcp_resources(Options.validate!(opts))
+  def exposed_mcp_action_resources(opts) when is_list(opts) do
+    exposed_mcp_action_resources(Options.validate!(opts))
   end
 
-  def exposed_mcp_resources(opts) do
-    if !opts.otp_app and !opts.actions do
-      raise "Must specify `otp_app` if you do not specify `actions`"
-    end
-
-    domains =
-      if opts.actions do
-        opts.actions
-        |> Enum.map(fn {resource, _actions} ->
-          domain = Ash.Resource.Info.domain(resource)
-
-          if !domain do
-            raise "Cannot use an ash resource that does not have a domain"
-          end
-
-          domain
-        end)
-        |> Enum.uniq()
-      else
-        Application.get_env(opts.otp_app, :ash_domains) || []
-      end
-
-    domains
+  def exposed_mcp_action_resources(opts) do
+    opts
+    |> resolve_domains()
     |> Enum.flat_map(fn domain ->
       domain
-      |> AshAi.Info.mcp_resources()
+      |> AshAi.Info.mcp_action_resources()
       |> Enum.filter(fn mcp_resource ->
         valid_mcp_resource(mcp_resource, opts.mcp_resources, opts.actions, opts.exclude_actions)
       end)
@@ -541,6 +579,51 @@ defmodule AshAi do
         }
       end)
     end)
+  end
+
+  @doc false
+  def exposed_mcp_ui_resources(opts) when is_list(opts) do
+    exposed_mcp_ui_resources(Options.validate!(opts))
+  end
+
+  def exposed_mcp_ui_resources(opts) do
+    opts
+    |> resolve_domains()
+    |> Enum.flat_map(fn domain ->
+      domain
+      |> AshAi.Info.mcp_ui_resources()
+      |> Enum.filter(fn ui_resource ->
+        case opts.mcp_resources do
+          nil -> true
+          :* -> true
+          [:*] -> true
+          [] -> false
+          list when is_list(list) -> ui_resource.name in list
+        end
+      end)
+    end)
+  end
+
+  defp resolve_domains(opts) do
+    if !opts.otp_app and !opts.actions do
+      raise "Must specify `otp_app` if you do not specify `actions`"
+    end
+
+    if opts.actions do
+      opts.actions
+      |> Enum.map(fn {resource, _actions} ->
+        domain = Ash.Resource.Info.domain(resource)
+
+        if !domain do
+          raise "Cannot use an ash resource that does not have a domain"
+        end
+
+        domain
+      end)
+      |> Enum.uniq()
+    else
+      Application.get_env(opts.otp_app, :ash_domains) || []
+    end
   end
 
   defp valid_mcp_resource(mcp_resource, allowed_mcp_resources, allowed_actions, exclude_actions) do

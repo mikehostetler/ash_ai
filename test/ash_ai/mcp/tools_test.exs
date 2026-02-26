@@ -14,6 +14,7 @@ defmodule AshAi.Mcp.ToolsTest do
 
   @opts [tools: [:list_artists], otp_app: :ash_ai]
   @opts_with_meta [tools: [:list_artists_with_meta], otp_app: :ash_ai]
+  @opts_with_ui [tools: [:list_artists_with_ui], otp_app: :ash_ai]
 
   describe "tools/list" do
     test "returns available MCP tools" do
@@ -45,6 +46,26 @@ defmodule AshAi.Mcp.ToolsTest do
                  }
                }
              ] = body["result"]["tools"]
+    end
+
+    test "tool with ui: option has _meta.ui.resourceUri" do
+      session_id = initialize_and_get_session_id(@opts_with_ui)
+
+      response = list_tools(session_id, @opts_with_ui)
+      body = decode_response(response)
+
+      [tool] = body["result"]["tools"]
+      assert tool["_meta"]["ui"]["resourceUri"] == "ui://test/app.html"
+    end
+
+    test "tool with explicit _meta preserves existing metadata" do
+      session_id = initialize_and_get_session_id(@opts_with_meta)
+
+      response = list_tools(session_id, @opts_with_meta)
+      body = decode_response(response)
+
+      [tool] = body["result"]["tools"]
+      assert tool["_meta"]["openai/outputTemplate"] == "ui://widget/artists-list.html"
     end
 
     test "excludes _meta when tool has no metadata" do

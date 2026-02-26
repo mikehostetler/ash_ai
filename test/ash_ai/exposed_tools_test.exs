@@ -17,7 +17,7 @@ defmodule AshAi.ExposedToolsTest do
   describe "tools filtering" do
     test "tools: nil returns all tools (default)" do
       tools = AshAi.exposed_tools(@opts)
-      assert length(tools) == 6
+      assert length(tools) == 7
     end
 
     test "tools: specific list filters to only those tools" do
@@ -57,7 +57,8 @@ defmodule AshAi.ExposedToolsTest do
                MapSet.new([
                  :list_artists,
                  :create_artist_after,
-                 :list_artists_with_meta
+                 :list_artists_with_meta,
+                 :list_artists_with_ui
                ])
     end
 
@@ -72,7 +73,8 @@ defmodule AshAi.ExposedToolsTest do
                  :list_artists,
                  :create_artist_after,
                  :update_artist_after,
-                 :list_artists_with_meta
+                 :list_artists_with_meta,
+                 :list_artists_with_ui
                ])
     end
 
@@ -90,7 +92,8 @@ defmodule AshAi.ExposedToolsTest do
                MapSet.new([
                  :list_artists,
                  :create_artist_manual,
-                 :list_artists_with_meta
+                 :list_artists_with_meta,
+                 :list_artists_with_ui
                ])
     end
 
@@ -124,7 +127,8 @@ defmodule AshAi.ExposedToolsTest do
                  :list_artists,
                  :create_artist_manual,
                  :update_artist_after,
-                 :list_artists_with_meta
+                 :list_artists_with_meta,
+                 :list_artists_with_ui
                ])
     end
   end
@@ -201,6 +205,14 @@ defmodule AshAi.ExposedToolsTest do
         assert is_struct(tool.action)
         assert tool.resource
       end
+    end
+
+    test "tool with ui: option is transformed to _meta.ui.resourceUri" do
+      tools = AshAi.exposed_tools(@opts)
+      ui_tool = Enum.find(tools, &(&1.name == :list_artists_with_ui))
+
+      assert ui_tool._meta["ui"]["resourceUri"] == "ui://test/app.html"
+      assert is_nil(ui_tool.ui)
     end
 
     test "tools are deduplicated" do

@@ -4,7 +4,7 @@
 
 defmodule AshAi.ExposedMcpResourcesTest do
   @moduledoc """
-  Tests for AshAi.exposed_mcp_resources/1 filtering logic.
+  Tests for AshAi.exposed_mcp_action_resources/1 filtering logic.
 
   This tests the core filtering functionality separate from the MCP protocol/router.
   """
@@ -17,7 +17,7 @@ defmodule AshAi.ExposedMcpResourcesTest do
   describe "mcp_resources filtering" do
     test "mcp_resources: :* returns all MCP resources" do
       opts = Keyword.put(@opts, :mcp_resources, :*)
-      resources = AshAi.exposed_mcp_resources(opts)
+      resources = AshAi.exposed_mcp_action_resources(opts)
 
       resource_names = Enum.map(resources, & &1.name)
       assert :artist_card in resource_names
@@ -30,7 +30,7 @@ defmodule AshAi.ExposedMcpResourcesTest do
 
     test "mcp_resources: nil returns all MCP resources (default)" do
       # @opts already has otp_app, should return all resources by default
-      resources = AshAi.exposed_mcp_resources(@opts)
+      resources = AshAi.exposed_mcp_action_resources(@opts)
       resource_names = Enum.map(resources, & &1.name)
       assert :artist_card in resource_names
       assert :artist_json in resource_names
@@ -42,14 +42,14 @@ defmodule AshAi.ExposedMcpResourcesTest do
 
     test "mcp_resources: [] excludes all MCP resources" do
       opts = Keyword.put(@opts, :mcp_resources, [])
-      resources = AshAi.exposed_mcp_resources(opts)
+      resources = AshAi.exposed_mcp_action_resources(opts)
 
       assert Enum.empty?(resources)
     end
 
     test "mcp_resources: specific list filters to only those resources" do
       opts = Keyword.put(@opts, :mcp_resources, [:artist_card, :artist_json])
-      resources = AshAi.exposed_mcp_resources(opts)
+      resources = AshAi.exposed_mcp_action_resources(opts)
 
       assert length(resources) == 2
       resource_names = Enum.map(resources, & &1.name)
@@ -60,7 +60,7 @@ defmodule AshAi.ExposedMcpResourcesTest do
 
     test "mcp_resources: single resource in list" do
       opts = Keyword.put(@opts, :mcp_resources, [:failing_resource])
-      resources = AshAi.exposed_mcp_resources(opts)
+      resources = AshAi.exposed_mcp_action_resources(opts)
 
       assert length(resources) == 1
       assert hd(resources).name == :failing_resource
@@ -73,7 +73,7 @@ defmodule AshAi.ExposedMcpResourcesTest do
         |> Keyword.put(:mcp_resources, [:artist_card, :artist_card_custom, :artist_json])
         |> Keyword.put(:actions, [{Music.ArtistUi, [:artist_card]}])
 
-      resources = AshAi.exposed_mcp_resources(opts)
+      resources = AshAi.exposed_mcp_action_resources(opts)
 
       # Should only return artist_card and artist_card_custom (both use artist_card action)
       # artist_json is excluded by actions filter
@@ -90,7 +90,7 @@ defmodule AshAi.ExposedMcpResourcesTest do
         |> Keyword.put(:mcp_resources, [:artist_card, :artist_json, :artist_with_params])
         |> Keyword.put(:exclude_actions, [{Music.ArtistUi, :artist_json}])
 
-      resources = AshAi.exposed_mcp_resources(opts)
+      resources = AshAi.exposed_mcp_action_resources(opts)
 
       # Should return artist_card and artist_with_params, but not artist_json
       assert length(resources) == 2
@@ -106,7 +106,7 @@ defmodule AshAi.ExposedMcpResourcesTest do
         |> Keyword.put(:mcp_resources, [])
         |> Keyword.put(:exclude_actions, [{Music.ArtistUi, :artist_card}])
 
-      resources = AshAi.exposed_mcp_resources(opts)
+      resources = AshAi.exposed_mcp_action_resources(opts)
 
       assert Enum.empty?(resources)
     end
@@ -117,7 +117,7 @@ defmodule AshAi.ExposedMcpResourcesTest do
         |> Keyword.put(:mcp_resources, [:artist_card, :artist_json])
         |> Keyword.put(:actions, [{Music.ArtistUi, :*}])
 
-      resources = AshAi.exposed_mcp_resources(opts)
+      resources = AshAi.exposed_mcp_action_resources(opts)
 
       # Should return only artist_card and artist_json (filtered by mcp_resources)
       assert length(resources) == 2
@@ -130,7 +130,7 @@ defmodule AshAi.ExposedMcpResourcesTest do
   describe "actions filtering" do
     test "actions: specific list filters resource/action pairs" do
       opts = Keyword.put(@opts, :actions, [{Music.ArtistUi, [:artist_card]}])
-      resources = AshAi.exposed_mcp_resources(opts)
+      resources = AshAi.exposed_mcp_action_resources(opts)
 
       # Should return resources using the artist_card action (both artist_card and artist_card_custom)
       assert length(resources) == 2
@@ -146,7 +146,7 @@ defmodule AshAi.ExposedMcpResourcesTest do
 
     test "actions: wildcard returns all actions for resource" do
       opts = Keyword.put(@opts, :actions, [{Music.ArtistUi, :*}])
-      resources = AshAi.exposed_mcp_resources(opts)
+      resources = AshAi.exposed_mcp_action_resources(opts)
 
       action_names = Enum.map(resources, & &1.action.name)
       assert :artist_card in action_names
@@ -160,7 +160,7 @@ defmodule AshAi.ExposedMcpResourcesTest do
   describe "exclude_actions filtering" do
     test "exclude_actions: removes specific resource/action pairs" do
       opts = Keyword.put(@opts, :exclude_actions, [{Music.ArtistUi, :artist_json}])
-      resources = AshAi.exposed_mcp_resources(opts)
+      resources = AshAi.exposed_mcp_action_resources(opts)
 
       refute :artist_json in Enum.map(resources, & &1.name)
     end
@@ -172,7 +172,7 @@ defmodule AshAi.ExposedMcpResourcesTest do
           {Music.ArtistUi, :failing_action}
         ])
 
-      resources = AshAi.exposed_mcp_resources(opts)
+      resources = AshAi.exposed_mcp_action_resources(opts)
       resource_names = Enum.map(resources, & &1.name)
 
       refute :artist_json in resource_names
@@ -188,7 +188,7 @@ defmodule AshAi.ExposedMcpResourcesTest do
         |> Keyword.put(:actions, [{Music.ArtistUi, :*}])
         |> Keyword.put(:exclude_actions, [{Music.ArtistUi, :artist_json}])
 
-      resources = AshAi.exposed_mcp_resources(opts)
+      resources = AshAi.exposed_mcp_action_resources(opts)
 
       resource_names = Enum.map(resources, & &1.name)
       assert :artist_card in resource_names
@@ -200,19 +200,19 @@ defmodule AshAi.ExposedMcpResourcesTest do
   describe "edge cases" do
     test "raises when no otp_app and no actions" do
       assert_raise RuntimeError, "Must specify `otp_app` if you do not specify `actions`", fn ->
-        AshAi.exposed_mcp_resources([])
+        AshAi.exposed_mcp_action_resources([])
       end
     end
 
     test "empty result when actions filter matches nothing" do
       opts = Keyword.put(@opts, :actions, [{Music.ArtistUi, [:nonexistent_action]}])
-      resources = AshAi.exposed_mcp_resources(opts)
+      resources = AshAi.exposed_mcp_action_resources(opts)
 
       assert Enum.empty?(resources)
     end
 
     test "returns enriched resources with domain and action metadata" do
-      resources = AshAi.exposed_mcp_resources(@opts)
+      resources = AshAi.exposed_mcp_action_resources(@opts)
 
       for resource <- resources do
         assert resource.domain
@@ -220,6 +220,39 @@ defmodule AshAi.ExposedMcpResourcesTest do
         assert is_struct(resource.action)
         assert resource.description || resource.action.description
       end
+    end
+  end
+
+  describe "exposed_mcp_ui_resources filtering" do
+    test "mcp_resources: nil returns all UI resources (default)" do
+      resources = AshAi.exposed_mcp_ui_resources(@opts)
+
+      assert length(resources) == 2
+      names = Enum.map(resources, & &1.name)
+      assert :test_app in names
+      assert :test_app_with_opts in names
+    end
+
+    test "mcp_resources: :* returns all UI resources" do
+      opts = Keyword.put(@opts, :mcp_resources, :*)
+      resources = AshAi.exposed_mcp_ui_resources(opts)
+
+      assert length(resources) == 2
+    end
+
+    test "mcp_resources: [] excludes all UI resources" do
+      opts = Keyword.put(@opts, :mcp_resources, [])
+      resources = AshAi.exposed_mcp_ui_resources(opts)
+
+      assert Enum.empty?(resources)
+    end
+
+    test "mcp_resources: specific list filters to only those UI resources" do
+      opts = Keyword.put(@opts, :mcp_resources, [:test_app])
+      resources = AshAi.exposed_mcp_ui_resources(opts)
+
+      assert length(resources) == 1
+      assert hd(resources).name == :test_app
     end
   end
 end

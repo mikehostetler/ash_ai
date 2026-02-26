@@ -22,6 +22,12 @@ defmodule AshAi.Test.Music do
            "openai/toolInvocation/invoking" => "Loading artists…",
            "openai/toolInvocation/invoked" => "Artists loaded."
          }
+
+    tool :list_artists_with_ui,
+         AshAi.Test.Music.ArtistAfterAction,
+         :read,
+         description: "Read artists with UI",
+         ui: :test_app
   end
 
   mcp_resources do
@@ -73,6 +79,19 @@ defmodule AshAi.Test.Music do
       description "Test resource for verifying actor is passed"
       mime_type "text/plain"
     end
+
+    mcp_ui_resource :test_app, "ui://test/app.html",
+      html_path: "test/fixtures/test_app.html",
+      title: "Test App",
+      description: "A test MCP App UI resource"
+
+    mcp_ui_resource :test_app_with_opts, "ui://test/csp_app.html",
+      html_path: "test/fixtures/test_app.html",
+      title: "CSP App",
+      csp: [connect_domains: ["api.example.com"], frame_domains: ["cdn.example.com"]],
+      permissions: [camera: true, clipboard_write: true],
+      domain: "test.example.com",
+      prefers_border: true
   end
 
   resources do

@@ -40,7 +40,7 @@ defmodule AshAi.Mcp.ResourcesTest do
       body = decode_response(response)
 
       resources = body["result"]["resources"]
-      assert length(resources) == 6
+      assert length(resources) == 8
 
       resource_names = Enum.map(resources, & &1["name"])
       assert "artist_card" in resource_names
@@ -49,6 +49,9 @@ defmodule AshAi.Mcp.ResourcesTest do
       assert "failing_resource" in resource_names
       assert "artist_card_custom" in resource_names
       assert "actor_test_resource" in resource_names
+      # UI resources
+      assert "test_app" in resource_names
+      assert "test_app_with_opts" in resource_names
 
       # Verify each resource has required fields
       for resource <- resources do
@@ -355,7 +358,7 @@ defmodule AshAi.Mcp.ResourcesTest do
 
       assert list_response.status == 200
       resources = list_body["result"]["resources"]
-      assert length(resources) == 6
+      assert length(resources) == 8
 
       first_resource = hd(resources)
       uri = first_resource["uri"]

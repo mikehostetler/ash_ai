@@ -14,7 +14,7 @@ defmodule AshAi.Verifiers.McpResourceActionsReturnString do
   @impl true
   def verify(dsl_state) do
     dsl_state
-    |> AshAi.Info.mcp_resources()
+    |> AshAi.Info.mcp_action_resources()
     |> Enum.map(&%{&1 | action: Ash.Resource.Info.action(&1.resource, &1.action)})
     |> Enum.filter(fn %{action: action} ->
       action.returns != Ash.Type.String

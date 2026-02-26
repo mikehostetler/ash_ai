@@ -51,6 +51,10 @@ tool :update_artist, Artist, :update, identity: :id, load: [:albums]
 tool :get_board, Board, :read, _meta: %{"openai/outputTemplate" => "ui://widget/kanban-board.html", "openai/toolInvocation/invoking" => "Preparing the board…", "openai/toolInvocation/invoked" => "Board ready."}
 ```
 
+```
+tool :list_artists, Artist, :read, ui: "ui://artists/list.html"
+```
+
 
 
 ### Arguments
@@ -70,6 +74,7 @@ tool :get_board, Board, :read, _meta: %{"openai/outputTemplate" => "ui://widget/
 | [`description`](#tools-tool-description){: #tools-tool-description } | `String.t` |  | A description for the tool. Defaults to the action's description. |
 | [`identity`](#tools-tool-identity){: #tools-tool-identity } | `atom` |  | The identity to use for update/destroy actions. Defaults to the primary key. Set to `false` to disable entirely. |
 | [`_meta`](#tools-tool-_meta){: #tools-tool-_meta } | `any` | `%{}` | Optional metadata map for tool integrations. Supports provider-specific extensions like OpenAI metadata. Keys and values should be strings to comply with JSON-RPC serialization. |
+| [`ui`](#tools-tool-ui){: #tools-tool-ui } | `atom \| String.t` |  | The `mcp_ui_resource` name (atom) or a `ui://` URI string for MCP Apps. Shortcut for setting `_meta.ui.resourceUri`. When an atom is given, the URI is resolved from the matching `mcp_ui_resource` declaration. |
 
 
 ### tools.tool.argument
@@ -173,6 +178,7 @@ Target: `AshAi.FullText`
 
 ### Nested DSLs
  * [mcp_resource](#mcp_resources-mcp_resource)
+ * [mcp_ui_resource](#mcp_resources-mcp_ui_resource)
 
 
 
@@ -232,6 +238,58 @@ mcp_resource :artist_data, "file://data/artist.json", Artist, :to_json, descript
 ### Introspection
 
 Target: `AshAi.McpResource`
+
+### mcp_resources.mcp_ui_resource
+```elixir
+mcp_ui_resource name, uri
+```
+
+
+A UI resource for MCP Apps — serves a static HTML file that is rendered in a sandboxed
+iframe by MCP hosts (like Claude Desktop). Link tools to UI resources using the tool's
+`ui:` option or `_meta.ui.resourceUri`.
+
+See [MCP Apps spec](https://modelcontextprotocol.io/specification/2025-11-25).
+
+
+
+
+### Examples
+```
+mcp_ui_resource :artist_viewer, "ui://artists/viewer.html", html_path: "priv/mcp_apps/artist_viewer.html"
+```
+
+```
+mcp_ui_resource :artist_dashboard, "ui://artists/dashboard.html", html_path: "priv/mcp_apps/artist_dashboard.html", csp: [connect_domains: ["api.example.com"]]
+```
+
+
+
+### Arguments
+
+| Name | Type | Default | Docs |
+|------|------|---------|------|
+| [`name`](#mcp_resources-mcp_ui_resource-name){: #mcp_resources-mcp_ui_resource-name .spark-required} | `atom` |  |  |
+| [`uri`](#mcp_resources-mcp_ui_resource-uri){: #mcp_resources-mcp_ui_resource-uri .spark-required} | `String.t` |  | The `ui://` URI for this resource. |
+### Options
+
+| Name | Type | Default | Docs |
+|------|------|---------|------|
+| [`html_path`](#mcp_resources-mcp_ui_resource-html_path){: #mcp_resources-mcp_ui_resource-html_path .spark-required} | `String.t` |  | Path to the HTML file on disk. Read at request time. |
+| [`title`](#mcp_resources-mcp_ui_resource-title){: #mcp_resources-mcp_ui_resource-title } | `String.t` |  | A short, human-readable title. Defaults to the resource name. |
+| [`description`](#mcp_resources-mcp_ui_resource-description){: #mcp_resources-mcp_ui_resource-description } | `String.t` |  | A description of the UI resource. |
+| [`csp`](#mcp_resources-mcp_ui_resource-csp){: #mcp_resources-mcp_ui_resource-csp } | `keyword` |  | Content Security Policy configuration. |
+| [`permissions`](#mcp_resources-mcp_ui_resource-permissions){: #mcp_resources-mcp_ui_resource-permissions } | `keyword` |  | Browser permissions to request for the sandboxed iframe. |
+| [`domain`](#mcp_resources-mcp_ui_resource-domain){: #mcp_resources-mcp_ui_resource-domain } | `atom \| String.t` | `:auto` | Domain for the view's sandbox origin. Defaults to `:auto`, which computes a Claude-compatible domain from the server URL at request time (see `AshAi.Mcp.Server.sandbox_domain/1`). Set to a string to override, or `nil` to omit. |
+| [`prefers_border`](#mcp_resources-mcp_ui_resource-prefers_border){: #mcp_resources-mcp_ui_resource-prefers_border } | `boolean` |  | Whether the app prefers a visible border and background from the host. |
+
+
+
+
+
+### Introspection
+
+Target: `AshAi.McpUiResource`
 
 
 
