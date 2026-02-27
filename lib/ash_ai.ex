@@ -780,8 +780,7 @@ defmodule AshAi do
         query or action input.
 
         #{Exception.format(:error, e, __STACKTRACE__)}
-        """,
-        __STACKTRACE__
+        """
       )
 
       false
