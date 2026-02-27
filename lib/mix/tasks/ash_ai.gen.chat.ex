@@ -19,17 +19,45 @@ defmodule Mix.Tasks.AshAi.Gen.Chat.Docs do
 
     Creates a `YourApp.Chat.Conversation` and a `YourApp.Chat.Message` resource, backed by postgres and ash_oban.
 
-    ## Example
+    ## Examples
+
+    ### Resources only, no UI:
 
     ```bash
-    #{example()}
+    mix ash_ai.gen.chat --user MyApp.Accounts.User
+    # Creates: MyApp.Chat domain with Conversation and Message resources
+    ```
+
+    ### Full-page LiveView with a named domain and Anthropic provider:
+
+    ```bash
+    mix ash_ai.gen.chat --user MyApp.Accounts.User --live --provider anthropic --domain MyApp.SupportChat
+    # Creates: MyApp.SupportChat resources and SupportChatLive mounted at /chat
+    ```
+
+    ### Embeddable LiveComponent with a custom domain and Gemini provider:
+
+    ```bash
+    mix ash_ai.gen.chat --user MyApp.Accounts.User --live-component --domain MyApp.SupportChat --provider gemini
+    # Creates: MyApp.SupportChat resources and SupportChatComponent
+    ```
+
+    ### Both LiveView and LiveComponent with all options:
+
+    ```bash
+    mix ash_ai.gen.chat --user MyApp.Accounts.User --live --live-component --domain MyApp.SupportChat --route /support/chat --provider anthropic
+    # Creates: MyApp.SupportChat resources, SupportChatLive at /support/chat, and SupportChatComponent
     ```
 
     ## Options
 
     * `--user` - The user resource.
-    * `--domain` - The domain to place the resources in.
+    * `--domain` - The domain module to place the resources in. E.g., `--domain MyApp.SupportChat` generates `MyApp.SupportChat.Conversation` and `MyApp.SupportChat.Message`. Defaults to `YourApp.Chat`.
+    * `--route` - A URL prefix for the chat routes. E.g., `--route support` mounts routes at `/support/chat`.
+    * `--provider` - The LLM provider to use: `anthropic` (default), `openai`, or `gemini`.
     * `--extend` - Extensions to apply to the generated resources, passed through to `mix ash.gen.resource`.
+    * `--live` - Generate a full-page Phoenix LiveView for the chat UI.
+    * `--live-component` - Generate a reusable Phoenix LiveComponent for embedding the chat UI in existing pages.
     """
   end
 end
@@ -47,8 +75,17 @@ if Code.ensure_loaded?(Igniter) do
       %Igniter.Mix.Task.Info{
         group: :ash_ai,
         example: __MODULE__.Docs.example(),
-        schema: [user: :string, domain: :string, extend: :string, live: :boolean, yes: :boolean],
-        defaults: [live: false, yes: false]
+        schema: [
+          user: :string,
+          domain: :string,
+          route: :string,
+          provider: :string,
+          extend: :string,
+          live: :boolean,
+          live_component: :boolean,
+          yes: :boolean
+        ],
+        defaults: [live: false, live_component: false, yes: false]
       }
     end
 
@@ -73,16 +110,17 @@ if Code.ensure_loaded?(Igniter) do
       |> create_conversation(conversation, message, user)
       |> create_message(chat, conversation, message, otp_app)
       |> add_chat_live(chat, conversation, message, user)
+      |> add_chat_live_component(chat, conversation, message, user)
       |> add_code_interfaces(chat, conversation, message, user)
       |> add_triggers(message, conversation, user)
       |> Ash.Igniter.codegen("add_ai_chat")
       |> Igniter.add_notice("""
       AshAi:
 
-      The chat feature has been generated assuming an OpenAI setup.
-      Please see LangChain's documentation on setting up other providers,
-      and modify the generated code accordingly to use your desired model.
+      The chat feature has been generated using the #{to_string(igniter.args.options[:provider] || "anthropic")} provider via LangChain.
+      Please see LangChain's documentation if you need to configure a different model or provider settings.
       """)
+      |> maybe_add_live_component_notice(chat)
     end
 
     defp ensure_deps(igniter, otp_app) do
@@ -150,8 +188,8 @@ if Code.ensure_loaded?(Igniter) do
     end
 
     defp create_conversation(igniter, conversation, message, user) do
-      generate_name =
-        Module.concat([conversation, Changes, GenerateName])
+      generate_name = Module.concat([conversation, Changes, GenerateName])
+      provider = llm_provider_config(igniter.args.options[:provider])
 
       igniter
       |> Igniter.compose_task(
@@ -198,7 +236,7 @@ if Code.ensure_loaded?(Igniter) do
       require Ash.Query
 
       alias LangChain.Chains.LLMChain
-      alias LangChain.ChatModels.ChatOpenAI
+      alias #{provider.module}
 
       @impl true
       def change(changeset, _opts, context) do
@@ -230,7 +268,7 @@ if Code.ensure_loaded?(Igniter) do
             end)
 
           %{
-            llm: ChatOpenAI.new!(%{model: "gpt-4o"}),
+            llm: #{provider.alias}.new!(%{model: "#{provider.model}"}),
             custom_context: Map.new(Ash.Context.to_opts(context)),
             verbose?: true
           }
@@ -273,6 +311,7 @@ if Code.ensure_loaded?(Igniter) do
         Module.concat([message, Changes, CreateConversationIfNotProvided])
 
       respond = Module.concat([message, Changes, Respond])
+      provider = llm_provider_config(igniter.args.options[:provider])
 
       source = Module.concat([message, Types, Source])
 
@@ -466,7 +505,7 @@ if Code.ensure_loaded?(Igniter) do
       require Ash.Query
 
       alias LangChain.Chains.LLMChain
-      alias LangChain.ChatModels.ChatOpenAI
+      alias #{provider.module}
 
       @impl true
       def change(changeset, _opts, context) do
@@ -493,7 +532,7 @@ if Code.ensure_loaded?(Igniter) do
           new_message_id = Ash.UUIDv7.generate()
 
           %{
-            llm: ChatOpenAI.new!(%{model: "gpt-4o", stream: true}),
+            llm: #{provider.alias}.new!(%{model: "#{provider.model}", stream: true}),
             custom_context: Map.new(Ash.Context.to_opts(context))
           }
           |> LLMChain.new!()
@@ -794,8 +833,10 @@ if Code.ensure_loaded?(Igniter) do
     defp add_chat_live(igniter, chat, conversation, message, user) do
       if igniter.args.options[:live] do
         web_module = Igniter.Libs.Phoenix.web_module(igniter)
-        chat_live = Igniter.Libs.Phoenix.web_module_name(igniter, "ChatLive")
+        chat_suffix = chat |> Module.split() |> List.last()
+        chat_live = Igniter.Libs.Phoenix.web_module_name(igniter, "#{chat_suffix}Live")
         live_user_auth = Igniter.Libs.Phoenix.web_module_name(igniter, "LiveUserAuth")
+        route = igniter.args.options[:route] || "/chat"
 
         {igniter, router} =
           Igniter.Libs.Phoenix.select_router(
@@ -825,11 +866,11 @@ if Code.ensure_loaded?(Igniter) do
             Igniter.Project.Module.create_module(
               igniter,
               chat_live,
-              chat_live_contents(web_module, on_mount, endpoint, chat, user)
+              chat_live_contents(web_module, on_mount, endpoint, chat, user, route)
             )
             |> set_message_pub_sub(message, endpoint)
             |> set_conversation_pub_sub(conversation, endpoint)
-            |> add_chat_live_route(chat_live, router)
+            |> add_chat_live_route(chat_live, router, route)
           else
             Igniter.add_warning(
               igniter,
@@ -847,11 +888,13 @@ if Code.ensure_loaded?(Igniter) do
       end
     end
 
-    defp add_chat_live_route(igniter, chat_live, router) do
+    defp add_chat_live_route(igniter, chat_live, router, route) do
+      live_module = inspect(Module.split(chat_live) |> Enum.drop(1) |> Module.concat())
+
       live =
         """
-            live \"/chat\", #{inspect(Module.split(chat_live) |> Enum.drop(1) |> Module.concat())}
-            live \"/chat/:conversation_id\", #{inspect(Module.split(chat_live) |> Enum.drop(1) |> Module.concat())}
+            live \"#{route}\", #{live_module}
+            live \"#{route}/:conversation_id\", #{live_module}
         """
 
       if router do
@@ -890,17 +933,138 @@ if Code.ensure_loaded?(Igniter) do
       end
     end
 
+    defp add_chat_live_component(igniter, chat, conversation, message, user) do
+      if igniter.args.options[:live_component] do
+        web_module = Igniter.Libs.Phoenix.web_module(igniter)
+        chat_suffix = chat |> Module.split() |> List.last()
+        component_name = "#{chat_suffix}Component"
+        chat_component = Igniter.Libs.Phoenix.web_module_name(igniter, component_name)
+
+        {igniter, endpoint} =
+          Igniter.Libs.Phoenix.select_endpoint(
+            igniter,
+            nil,
+            "Which `Phoenix.Endpoint` should we use for pubsub events?"
+          )
+
+        if endpoint do
+          Igniter.Project.Module.create_module(
+            igniter,
+            chat_component,
+            chat_live_component_contents(web_module, endpoint, chat, user)
+          )
+          |> set_message_pub_sub(message, endpoint)
+          |> set_conversation_pub_sub(conversation, endpoint)
+        else
+          Igniter.add_warning(
+            igniter,
+            "Could not find an endpoint for pubsub, or no endpoint was selected, live component has been skipped."
+          )
+        end
+      else
+        igniter
+      end
+    end
+
+    defp maybe_add_live_component_notice(igniter, chat) do
+      if igniter.args.options[:live_component] do
+        web_module = Igniter.Libs.Phoenix.web_module(igniter)
+        chat_suffix = chat |> Module.split() |> List.last()
+        component_module = Module.concat([web_module, :"#{chat_suffix}Component"])
+
+        Igniter.add_notice(igniter, """
+        AshAi LiveComponent:
+
+        A #{inspect(component_module)} has been generated.
+
+        To embed the chat component in your LiveView:
+
+            <.live_component
+              module={#{inspect(component_module)}}
+              id="chat"
+              current_user={@current_user}
+              conversation_id={@conversation_id}
+              hide_sidebar={false}
+            />
+
+        Your parent LiveView must:
+
+        1. Subscribe to PubSub topics and forward broadcasts:
+
+            def mount(_params, _session, socket) do
+              if connected?(socket) do
+                #{inspect(component_module)}.subscribe(socket.assigns.current_user)
+              end
+              {:ok, socket}
+            end
+
+            def handle_info(%Phoenix.Socket.Broadcast{} = broadcast, socket) do
+              send_update(#{inspect(component_module)}, id: "chat", broadcast: broadcast)
+              {:noreply, socket}
+            end
+
+        2. Handle navigation requests from the component:
+
+            def handle_info({:chat_component_navigate, nil}, socket) do
+              # Handle new chat - update conversation_id assign or navigate
+              {:noreply, assign(socket, :conversation_id, nil)}
+            end
+
+            def handle_info({:chat_component_navigate, conversation_id}, socket) do
+              # Handle conversation selection - update conversation_id assign or navigate
+              {:noreply, assign(socket, :conversation_id, conversation_id)}
+            end
+        """)
+      else
+        igniter
+      end
+    end
+
+    defp llm_provider_config(provider) do
+      case to_string(provider || "anthropic") do
+        "openai" ->
+          %{
+            alias: "ChatOpenAI",
+            module: "LangChain.ChatModels.ChatOpenAI",
+            env_var: "OPENAI_API_KEY",
+            langchain_key: :openai_key,
+            model: "gpt-4o"
+          }
+
+        "gemini" ->
+          %{
+            alias: "ChatGoogleAI",
+            module: "LangChain.ChatModels.ChatGoogleAI",
+            env_var: "GOOGLE_API_KEY",
+            langchain_key: :google_ai_key,
+            model: "gemini-1.5-pro"
+          }
+
+        _ ->
+          %{
+            alias: "ChatAnthropic",
+            module: "LangChain.ChatModels.ChatAnthropic",
+            env_var: "ANTHROPIC_API_KEY",
+            langchain_key: :anthropic_key,
+            model: "claude-opus-4-6"
+          }
+      end
+    end
+
     defp configure(igniter) do
+      provider = llm_provider_config(igniter.args.options[:provider])
+      env_var = provider.env_var
+
       api_key_code =
         quote do
-          fn -> System.fetch_env!("OPENAI_API_KEY") end
+          fn -> System.fetch_env!(unquote(env_var)) end
         end
 
       igniter
       |> Igniter.Project.Config.configure_new(
         "runtime.exs",
         :langchain,
-        [:openai_key],
+        [provider.langchain_key],
         {:code, api_key_code}
       )
       |> Igniter.Project.IgniterConfig.add_extension(Igniter.Extensions.Phoenix)
@@ -1013,7 +1177,7 @@ if Code.ensure_loaded?(Igniter) do
       apply(AshOban.Igniter, :add_new_trigger, [igniter, conversation, name, code])
     end
 
-    defp chat_live_contents(web_module, on_mount, endpoint, chat, user) do
+    defp chat_live_contents(web_module, on_mount, endpoint, chat, user, route) do
       interface_name =
         if user do
           "my_conversations"
@@ -1127,7 +1291,7 @@ if Code.ensure_loaded?(Igniter) do
                   Conversations
                 </div>
                 <div class="mb-4">
-                  <.link navigate={~p"/chat"} class="btn btn-primary btn-lg mb-2">
+                  <.link navigate={~p"#{route}"} class="btn btn-primary btn-lg mb-2">
                     <div class="rounded-full bg-primary-content text-primary w-6 h-6 flex items-center justify-center">
                       <.icon name="hero-plus" />
                     </div>
@@ -1138,7 +1302,7 @@ if Code.ensure_loaded?(Igniter) do
                   <%= for {id, conversation} <- @streams.conversations do %>
                     <li id={id}>
                       <.link
-                        navigate={~p"/chat/\#{conversation.id}"}
+                        navigate={~p"#{route}/\#{conversation.id}"}
                         phx-click="select_conversation"
                         phx-value-id={conversation.id}
                         class={"block py-2 px-3 transition border-l-4 pl-2 mb-2 \#{if @conversation && @conversation.id == conversation.id, do: "border-primary font-medium", else: "border-transparent"}"}
@@ -1228,7 +1392,7 @@ if Code.ensure_loaded?(Igniter) do
               else
                 {:noreply,
                  socket
-                 |> push_navigate(to: ~p"/chat/\#{message.conversation_id}")}
+                 |> push_navigate(to: ~p"#{route}/chat/\#{message.conversation_id}")}
               end
 
             {:error, form} ->
@@ -1318,6 +1482,335 @@ if Code.ensure_loaded?(Igniter) do
             {:error, _} -> text
           end
         end
+      """
+    end
+
+    defp chat_live_component_contents(web_module, endpoint, chat, user) do
+      interface_name =
+        if user do
+          "my_conversations"
+        else
+          "list_conversations"
+        end
+
+      """
+      use #{inspect(web_module)}, :live_component
+
+      @impl true
+      def update(%{broadcast: broadcast}, socket) do
+        {:ok, handle_broadcast(socket, broadcast)}
+      end
+
+      def update(assigns, socket) do
+        socket = assign(socket, assigns)
+
+        socket =
+          if !socket.assigns[:initialized] do
+            socket
+            |> assign(:initialized, true)
+            |> assign_new(:hide_sidebar, fn -> false end)
+            |> assign_new(:conversation, fn -> nil end)
+            |> assign_new(:conversation_id, fn -> nil end)
+            |> stream(
+              :conversations,
+              #{inspect(chat)}.#{interface_name}!(actor: socket.assigns.current_user)
+            )
+            |> stream(:messages, [])
+            |> assign_message_form()
+          else
+            socket
+          end
+
+        socket =
+          cond do
+            socket.assigns[:conversation_id] &&
+                socket.assigns[:conversation_id] != get_current_conversation_id(socket) ->
+              load_conversation(socket, socket.assigns.conversation_id)
+
+            !socket.assigns[:conversation_id] && socket.assigns.conversation ->
+              clear_conversation(socket)
+
+            true ->
+              socket
+          end
+
+        {:ok, socket}
+      end
+
+      @doc \"\"\"
+      Subscribes the calling process to PubSub topics for the given user.
+
+      Call this from your parent LiveView's `mount/3`:
+
+          if connected?(socket) do
+            MyAppWeb.ChatComponent.subscribe(socket.assigns.current_user, socket)
+          end
+      \"\"\"
+      def subscribe(current_user, _socket) do
+        #{inspect(endpoint)}.subscribe("chat:conversations:\#{current_user.id}")
+      end
+
+      @impl true
+      def render(assigns) do
+        ~H\"""
+        <div id={@id} class="flex bg-base-200 min-h-full max-h-full">
+          <div :if={!@hide_sidebar} class="w-72 border-r bg-base-300 flex flex-col overflow-y-auto">
+            <div class="py-4 px-6">
+              <div class="text-lg mb-4">
+                Conversations
+              </div>
+              <div class="mb-4">
+                <button phx-click="new_chat" phx-target={@myself} class="btn btn-primary btn-lg mb-2">
+                  <div class="rounded-full bg-primary-content text-primary w-6 h-6 flex items-center justify-center">
+                    <.icon name="hero-plus" />
+                  </div>
+                  <span>New Chat</span>
+                </button>
+              </div>
+              <ul class="flex flex-col-reverse" phx-update="stream" id={"\#{@id}-conversations-list"}>
+                <%= for {id, conversation} <- @streams.conversations do %>
+                  <li id={id}>
+                    <button
+                      phx-click="select_conversation"
+                      phx-target={@myself}
+                      phx-value-id={conversation.id}
+                      class={"block py-2 px-3 transition border-l-4 pl-2 mb-2 w-full text-left \#{if @conversation && @conversation.id == conversation.id, do: "border-primary font-medium", else: "border-transparent"}"}
+                    >
+                      {build_conversation_title_string(conversation.title)}
+                    </button>
+                  </li>
+                <% end %>
+              </ul>
+            </div>
+          </div>
+
+          <div class="flex-1 flex flex-col">
+            <div class="navbar bg-base-300 w-full">
+              <img
+                src="https://github.com/ash-project/ash_ai/blob/main/logos/ash_ai.png?raw=true"
+                alt="Logo"
+                class="h-12"
+                height="48"
+              />
+              <div class="mx-2 flex-1 px-2">
+                <p :if={@conversation}>{build_conversation_title_string(@conversation.title)}</p>
+                <p class="text-xs">AshAi</p>
+              </div>
+            </div>
+
+            <div class="flex-1 flex flex-col overflow-y-scroll bg-base-200">
+              <div
+                id={"\#{@id}-message-container"}
+                phx-update="stream"
+                class="flex-1 overflow-y-auto px-4 py-2 flex flex-col-reverse"
+              >
+                <%= for {id, message} <- @streams.messages do %>
+                  <div
+                    id={id}
+                    class={[
+                      "chat",
+                      message.source == :user && "chat-end",
+                      message.source == :agent && "chat-start"
+                    ]}
+                  >
+                    <div :if={message.source == :agent} class="chat-image avatar">
+                      <div class="w-10 rounded-full bg-base-300 p-1">
+                        <img
+                          src="https://github.com/ash-project/ash_ai/blob/main/logos/ash_ai.png?raw=true"
+                          alt="Logo"
+                        />
+                      </div>
+                    </div>
+                    <div :if={message.source == :user} class="chat-image avatar avatar-placeholder">
+                      <div class="w-10 rounded-full bg-base-300">
+                        <.icon name="hero-user-solid" class="block" />
+                      </div>
+                    </div>
+                    <div class="chat-bubble">
+                      <%= to_markdown(message.text) %>
+                    </div>
+                  </div>
+                <% end %>
+              </div>
+            </div>
+            <div class="p-4 border-t h-16">
+              <.form
+                :let={form}
+                for={@message_form}
+                phx-change="validate_message"
+                phx-target={@myself}
+                phx-debounce="blur"
+                phx-submit="send_message"
+                class="flex items-center gap-4"
+              >
+                <div class="flex-1">
+                  <input
+                    name={form[:text].name}
+                    value={form[:text].value}
+                    type="text"
+                    phx-mounted={JS.focus()}
+                    placeholder="Type your message..."
+                    class="input input-primary w-full mb-0"
+                    autocomplete="off"
+                  />
+                </div>
+                <button type="submit" class="btn btn-primary rounded-full">
+                  <.icon name="hero-paper-airplane" /> Send
+                </button>
+              </.form>
+            </div>
+          </div>
+        </div>
+        \"""
+      end
+
+      @impl true
+      def handle_event("validate_message", %{"form" => params}, socket) do
+        {:noreply, assign(socket, :message_form, AshPhoenix.Form.validate(socket.assigns.message_form, params))}
+      end
+
+      @impl true
+      def handle_event("send_message", %{"form" => params}, socket) do
+        case AshPhoenix.Form.submit(socket.assigns.message_form, params: params) do
+          {:ok, message} ->
+            if socket.assigns.conversation do
+              socket
+              |> assign_message_form()
+              |> stream_insert(:messages, message, at: 0)
+              |> then(&{:noreply, &1})
+            else
+              send(self(), {:chat_component_navigate, message.conversation_id})
+              {:noreply, assign_message_form(socket)}
+            end
+
+          {:error, form} ->
+            {:noreply, assign(socket, :message_form, form)}
+        end
+      end
+
+      @impl true
+      def handle_event("select_conversation", %{"id" => id}, socket) do
+        send(self(), {:chat_component_navigate, id})
+        {:noreply, socket}
+      end
+
+      @impl true
+      def handle_event("new_chat", _, socket) do
+        send(self(), {:chat_component_navigate, nil})
+        {:noreply, socket}
+      end
+
+      defp load_conversation(socket, conversation_id) do
+        conversation =
+          #{inspect(chat)}.get_conversation!(conversation_id, actor: socket.assigns.current_user)
+
+        #{inspect(endpoint)}.subscribe("chat:messages:\#{conversation.id}")
+
+        socket
+        |> assign(:conversation, conversation)
+        |> stream(:messages, #{inspect(chat)}.message_history!(conversation.id, stream?: true), reset: true)
+        |> assign_message_form()
+      end
+
+      defp clear_conversation(socket) do
+        if socket.assigns[:conversation] do
+          #{inspect(endpoint)}.unsubscribe("chat:messages:\#{socket.assigns.conversation.id}")
+        end
+
+        socket
+        |> assign(:conversation, nil)
+        |> stream(:messages, [], reset: true)
+        |> assign_message_form()
+      end
+
+      defp get_current_conversation_id(socket) do
+        if socket.assigns[:conversation], do: socket.assigns.conversation.id, else: nil
+      end
+
+      defp handle_broadcast(socket, %Phoenix.Socket.Broadcast{
+        topic: "chat:messages:" <> conversation_id,
+        payload: message
+      }) do
+        if socket.assigns.conversation && socket.assigns.conversation.id == conversation_id do
+          stream_insert(socket, :messages, message, at: 0)
+        else
+          socket
+        end
+      end
+
+      defp handle_broadcast(socket, %Phoenix.Socket.Broadcast{
+        topic: "chat:conversations:" <> _,
+        payload: conversation
+      }) do
+        socket =
+          if socket.assigns.conversation && socket.assigns.conversation.id == conversation.id do
+            assign(socket, :conversation, conversation)
+          else
+            socket
+          end
+
+        stream_insert(socket, :conversations, conversation)
+      end
+
+      defp handle_broadcast(socket, _), do: socket
+
+      def build_conversation_title_string(title) do
+        cond do
+          title == nil -> "Untitled conversation"
+          is_binary(title) && String.length(title) > 25 -> String.slice(title, 0, 25) <> "..."
+          is_binary(title) && String.length(title) <= 25 -> title
+        end
+      end
+
+      defp assign_message_form(socket) do
+        form =
+          if socket.assigns.conversation do
+            #{inspect(chat)}.form_to_create_message(
+              actor: socket.assigns.current_user,
+              private_arguments: %{conversation_id: socket.assigns.conversation.id}
+            )
+            |> to_form()
+          else
+            #{inspect(chat)}.form_to_create_message(actor: socket.assigns.current_user)
+            |> to_form()
+          end
+
+        assign(
+          socket,
+          :message_form,
+          form
+        )
+      end
+
+      defp to_markdown(text) do
+        MDEx.to_html(text,
+          extension: [
+            strikethrough: true,
+            tagfilter: true,
+            table: true,
+            autolink: true,
+            tasklist: true,
+            footnotes: true,
+            shortcodes: true
+          ],
+          parse: [
+            smart: true,
+            relaxed_tasklist_matching: true,
+            relaxed_autolinks: true
+          ],
+          render: [
+            github_pre_lang: true,
+            unsafe: true
+          ],
+          sanitize: MDEx.Document.default_sanitize_options()
+        )
+        |> case do
+          {:ok, html} ->
+            html
+            |> Phoenix.HTML.raw()
+          {:error, _} -> text
+        end
+      end
       """
     end
   end
