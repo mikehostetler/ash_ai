@@ -55,6 +55,7 @@ defmodule AshAi.Actions.Prompt do
   ## Model Specification
 
   The first argument to `prompt/2` is a model specification string in the format `"provider:model-name"`.
+  Valid model strings can be browsed at https://llmdb.xyz.
   Examples: `"openai:gpt-4o"`, `"anthropic:claude-haiku-4-5"`, `"openai:gpt-4o-mini"`.
 
   ## Options
