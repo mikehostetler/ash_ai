@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2024 ash_ai contributors <https://github.com/ash-project/ash_ai/graphs/contributors>
+# SPDX-FileCopyrightText: 2024 ash_ai contributors <https://github.com/ash-project/ash_ai/graphs.contributors>
 #
 # SPDX-License-Identifier: MIT
 
@@ -8,11 +8,13 @@ defmodule AshAi.EmbeddingModel do
   """
 
   @type opts :: Keyword.t()
+  @type vector :: [float()]
 
   @doc "The dimensions of generated embeddings"
   @callback dimensions(opts) :: pos_integer()
+
   @doc "Generate embeddings for the given list of strings"
-  @callback generate([String.t()], opts) :: {:ok, [binary()]} | {:error, term()}
+  @callback generate([String.t()], opts) :: {:ok, [vector()]} | {:error, term()}
 
   defmacro __using__(_) do
     quote do

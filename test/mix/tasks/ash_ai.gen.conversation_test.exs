@@ -66,7 +66,24 @@ defmodule Mix.Tasks.AshAi.Gen.ChatTest do
     +|live "/support/chat/:conversation_id", SupportChatLive
     """)
     |> assert_has_patch("config/runtime.exs", """
-    + |config :langchain, openai_key: fn -> System.fetch_env!("OPENAI_API_KEY") end
+    + |config :req_llm, openai_api_key: System.get_env("OPENAI_API_KEY")
+    """)
+    |> apply_igniter!()
+  end
+
+  test "--live with --user guards unauthenticated actor-required flows", %{argv: argv} do
+    argv = argv ++ ["--live"]
+
+    phx_test_project()
+    |> Igniter.compose_task("ash_ai.gen.chat", argv)
+    |> assert_has_patch("lib/test_web/live/chat_live.ex", """
+    |if @actor_required? && is_nil(socket.assigns.current_user) do
+    """)
+    |> assert_has_patch("lib/test_web/live/chat_live.ex", """
+    |{:noreply, put_flash(socket, :error, "You must sign in to send messages")}
+    """)
+    |> assert_has_patch("lib/test_web/live/chat_live.ex", """
+    ||> put_flash(:error, "You must sign in to access conversations")
     """)
     |> apply_igniter!()
   end

@@ -5,21 +5,19 @@ SPDX-License-Identifier: MIT
 -->
 
 # Google Gemini Configuration
-Steps to configure The generated Chat Server to work with Gemini
+Use this guide if you want your generated chat server to run on Google Gemini models.
+This is an optional provider switch; you can keep OpenAI configured and add Gemini alongside it.
 
 
 ## Configuration
-In `config/runtime.ex` replace:
+In `config/runtime.exs`, ensure your `:req_llm` config includes a Google API key.
+If you already have other providers configured, keep them and add the Google key.
 
 ```elixir
-config :langchain, openai_key: fn -> System.fetch_env!("OPENAI_API_KEY") end
-```
-
-With:
-
-```elixir
-config :langchain,
-  google_ai_key: fn -> System.get_env("GEMINI_API_KEY") end
+config :req_llm,
+  google_api_key: System.fetch_env!("GOOGLE_API_KEY"),
+  # Optional: keep this if your app also uses OpenAI models.
+  openai_api_key: System.get_env("OPENAI_API_KEY")
 ```
 
 
@@ -31,27 +29,13 @@ In
 - `lib/your_app/chat/conversation/changes/generate_name.ex`
 
 
-Replace:
+If you want Gemini for chat generation, set the model to a Google model spec:
 
 ```elixir
- alias LangChain.ChatModels.ChatOpenAI
-
- ....
-
- llm: ChatOpenAI.new!(%{model: "gpt-4o", stream: true}),
-
-
+model: "google:gemini-2.5-pro"
 ```
-With:
 
-```elixir
- alias LangChain.ChatModels.ChatGoogleAI
-
- ...
-
- llm: ChatGoogleAI.new!(%{model: "gemini-2.5-pro", stream: true}),
-
-```
+If you prefer OpenAI (or another provider), keep your existing `model:` value.
 
 
 ## Embeddings
@@ -68,7 +52,7 @@ defmodule YourApp.GoogleAiEmbeddingModel do
   @impl true
   def generate(texts, _opts) do
     parts = Enum.map(texts, fn t -> %{text: t} end)
-    api_key = System.fetch_env!("GEMINI_API_KEY")
+    api_key = System.fetch_env!("GOOGLE_API_KEY")
 
     headers = [
       {"x-goog-api-key", "#{api_key}"},

@@ -117,8 +117,8 @@ if Code.ensure_loaded?(Igniter) do
       |> Igniter.add_notice("""
       AshAi:
 
-      The chat feature has been generated using the #{to_string(igniter.args.options[:provider])} provider via LangChain.
-      Please see LangChain's documentation if you need to configure a different model or provider settings.
+      The chat feature has been generated using the #{to_string(igniter.args.options[:provider])} provider via ReqLLM.
+      Please see ReqLLM's documentation if you need to configure a different model or provider settings.
       All tools in your application are available in the chat by default. Change tools: true to tools: [:a, :list, :of, :tools] to change that.
       """)
       |> maybe_add_live_component_notice(chat)
@@ -236,8 +236,7 @@ if Code.ensure_loaded?(Igniter) do
       use Ash.Resource.Change
       require Ash.Query
 
-      alias LangChain.Chains.LLMChain
-      alias #{provider.module}
+      alias ReqLLM.Context
 
       @impl true
       def change(changeset, _opts, context) do
@@ -252,43 +251,32 @@ if Code.ensure_loaded?(Igniter) do
             |> Ash.Query.sort(inserted_at: :asc)
             |> Ash.read!()
 
-          system_prompt =
-            LangChain.Message.new_system!(\"""
-            Provide a short name for the current conversation.
-            2-8 words, preferring more succinct names.
-            RESPOND WITH ONLY THE NEW CONVERSATION NAME.
-            \""")
+          prompt_messages =
+            [
+              Context.system(\"""
+              Provide a short name for the current conversation.
+              2-8 words, preferring more succinct names.
+              RESPOND WITH ONLY THE NEW CONVERSATION NAME.
+              \""")
+            ] ++
+              Enum.map(messages, fn message ->
+                if message.source == :agent do
+                  Context.assistant(message.text)
+                else
+                  Context.user(message.text)
+                end
+              end)
 
-          message_chain =
-            Enum.map(messages, fn message ->
-              if message.source == :agent do
-                LangChain.Message.new_assistant!(message.text)
-              else
-                LangChain.Message.new_user!(message.text)
-              end
-            end)
-
-          %{
-            llm: #{provider.alias}.new!(%{model: "#{provider.model}"}),
-            custom_context: Map.new(Ash.Context.to_opts(context)),
-            verbose?: true
-          }
-          |> LLMChain.new!()
-          |> LLMChain.add_message(system_prompt)
-          |> LLMChain.add_messages(message_chain)
-          |> LLMChain.run(mode: :while_needs_response)
+          ReqLLM.generate_text("#{provider.model}", prompt_messages)
           |> case do
-            {:ok,
-            %LangChain.Chains.LLMChain{
-              last_message: %{content: content}
-            }} ->
+            {:ok, response} ->
               Ash.Changeset.force_change_attribute(
-              changeset,
-              :title,
-              LangChain.Message.ContentPart.content_to_string(content)
-            )
+                changeset,
+                :title,
+                ReqLLM.Response.text(response)
+              )
 
-            {:error, _, error} ->
+            {:error, error} ->
               {:error, error}
           end
         end)
@@ -505,8 +493,7 @@ if Code.ensure_loaded?(Igniter) do
       use Ash.Resource.Change
       require Ash.Query
 
-      alias LangChain.Chains.LLMChain
-      alias #{provider.module}
+      alias ReqLLM.Context
 
       @impl true
       def change(changeset, _opts, context) do
@@ -522,95 +509,83 @@ if Code.ensure_loaded?(Igniter) do
             |> Ash.read!()
             |> Enum.concat([%{source: :user, text: message.text}])
 
-          system_prompt =
-            LangChain.Message.new_system!(\"""
+          prompt_messages =
+            [
+              Context.system(\"""
             You are a helpful chat bot.
             Your job is to use the tools at your disposal to assist the user.
             \""")
-
-          message_chain = message_chain(messages)
+            ] ++ message_chain(messages)
 
           new_message_id = Ash.UUIDv7.generate()
 
-          %{
-            llm: #{provider.alias}.new!(%{model: "#{provider.model}", stream: true}),
-            custom_context: Map.new(Ash.Context.to_opts(context))
-          }
-          |> LLMChain.new!()
-          |> LLMChain.add_message(system_prompt)
-          |> LLMChain.add_messages(message_chain)
-          # add the names of tools you want available in your conversation here.
-          # i.e tools: [:lookup_weather]
-          |> AshAi.setup_ash_ai(otp_app: :#{otp_app}, tools: true, actor: context.actor)
-          |> LLMChain.add_callback(%{
-            on_llm_new_delta: fn  _chain, deltas ->
-              deltas
-              |> List.wrap()
-              |> Enum.each(fn delta ->
-                content = LangChain.MessageDelta.content_to_string(delta)
-
-                if not is_nil(content) and content != "" do
+          final_state =
+            prompt_messages
+            |> AshAi.ToolLoop.stream(
+              otp_app: :#{otp_app},
+              tools: true,
+              model: "#{provider.model}",
+              actor: context.actor,
+              tenant: context.tenant,
+              context: Map.new(Ash.Context.to_opts(context))
+            )
+            |> Enum.reduce(%{text: "", tool_calls: [], tool_results: []}, fn
+              {:content, content}, acc ->
+                if content not in [nil, ""] do
                   #{inspect(message)}
-                  |> Ash.Changeset.for_create(:upsert_response, %{
-                    id: new_message_id,
-                    response_to_id: message.id,
-                    conversation_id: message.conversation_id,
-                    text: content
-                  }, actor: %AshAi{})
+                  |> Ash.Changeset.for_create(
+                    :upsert_response,
+                    %{
+                      id: new_message_id,
+                      response_to_id: message.id,
+                      conversation_id: message.conversation_id,
+                      text: content
+                    },
+                    actor: %AshAi{}
+                  )
                   |> Ash.create!()
                 end
-              end)
-            end,
-            on_message_processed: fn _chain, data ->
-            content = LangChain.Message.ContentPart.content_to_string(data.content)
 
-              if (data.tool_calls && Enum.any?(data.tool_calls)) ||
-                   (data.tool_results && Enum.any?(data.tool_results)) ||
-                    content not in [nil, ""] do
-                #{inspect(message)}
-                |> Ash.Changeset.for_create(
-                  :upsert_response,
-                  %{
-                    id: new_message_id,
-                    response_to_id: message.id,
-                    conversation_id: message.conversation_id,
-                    complete: true,
-                    tool_calls:
-                      data.tool_calls &&
-                        Enum.map(
-                          data.tool_calls,
-                          &Map.take(&1, [:status, :type, :call_id, :name, :arguments, :index])
-                        ),
-                    tool_results:
-                      data.tool_results &&
-                        Enum.map(
-                          data.tool_results,
-                          &Map.update(
-                            Map.take(&1, [
-                              :type,
-                              :tool_call_id,
-                              :name,
-                              :content,
-                              :display_text,
-                              :is_error,
-                              :options
-                            ]),
-                            :content,
-                            nil,
-                            fn content ->
-                              LangChain.Message.ContentPart.content_to_string(content)
-                            end
-                          )
-                        ),
-                    text: content || ""
-                  },
-                  actor: %AshAi{}
-                )
-                |> Ash.create!()
-              end
+                %{acc | text: acc.text <> (content || "")}
+
+              {:tool_call, tool_call}, acc ->
+                %{acc | tool_calls: acc.tool_calls ++ [tool_call]}
+
+              {:tool_result, %{id: id, result: result}}, acc ->
+                %{acc | tool_results: acc.tool_results ++ [normalize_tool_result(id, result)]}
+
+              {:done, _}, acc ->
+                acc
+
+              _, acc ->
+                acc
+            end)
+
+          final_text =
+            if String.trim(final_state.text || "") == "" &&
+                 (final_state.tool_calls != [] || final_state.tool_results != []) do
+              "Completed tool call."
+            else
+              final_state.text
             end
-          })
-          |> LLMChain.run(mode: :while_needs_response)
+
+          if final_state.tool_calls != [] || final_state.tool_results != [] || final_text != "" do
+            #{inspect(message)}
+            |> Ash.Changeset.for_create(
+              :upsert_response,
+              %{
+                id: new_message_id,
+                response_to_id: message.id,
+                conversation_id: message.conversation_id,
+                complete: true,
+                tool_calls: final_state.tool_calls,
+                tool_results: final_state.tool_results,
+                text: final_text
+              },
+              actor: %AshAi{}
+            )
+            |> Ash.create!()
+          end
 
           changeset
         end)
@@ -619,47 +594,70 @@ if Code.ensure_loaded?(Igniter) do
       defp message_chain(messages) do
         Enum.flat_map(messages, fn
           %{source: :agent} = message ->
-            langchain_message =
-              LangChain.Message.new_assistant!(%{
-                content: message.text,
-                tool_calls:
-                  message.tool_calls &&
-                    Enum.map(
-                      message.tool_calls,
-                      &LangChain.Message.ToolCall.new!(
-                        Map.take(&1, ["status", "type", "call_id", "name", "arguments", "index"])
-                      )
-                    )
-              })
+            assistant =
+              Context.assistant(
+                message.text || "",
+                tool_calls: normalize_tool_calls(message.tool_calls || [])
+              )
 
-            if message.tool_results && !Enum.empty?(message.tool_results) do
-              [
-                langchain_message,
-                LangChain.Message.new_tool_result!(%{
-                  tool_results:
-                    Enum.map(
-                      message.tool_results,
-                      &LangChain.Message.ToolResult.new!(
-                        Map.take(&1, [
-                          "type",
-                          "tool_call_id",
-                          "name",
-                          "content",
-                          "display_text",
-                          "is_error",
-                          "options"
-                        ])
-                      )
-                    )
-                })
-              ]
-            else
-              [langchain_message]
-            end
+            tool_results =
+              message.tool_results
+              |> List.wrap()
+              |> Enum.flat_map(fn result ->
+                case normalize_tool_result_message(result) do
+                  nil -> []
+                  message -> [message]
+                end
+              end)
+
+            [assistant | tool_results]
 
           %{source: :user, text: text} ->
-            [LangChain.Message.new_user!(text)]
+            [Context.user(text || "")]
         end)
+      end
+
+      defp normalize_tool_calls(tool_calls) do
+        Enum.flat_map(List.wrap(tool_calls), fn call ->
+          normalized = %{
+            id:
+              call["id"] || call[:id] || call["call_id"] || call[:call_id] ||
+                "call_\\#{:erlang.unique_integer([:positive])}",
+            name: call["name"] || call[:name],
+            arguments: call["arguments"] || call[:arguments] || %{}
+          }
+
+          if is_binary(normalized.name), do: [normalized], else: []
+        end)
+      end
+
+      defp normalize_tool_result_message(result) do
+        id =
+          result["tool_call_id"] || result[:tool_call_id] || result["id"] || result[:id]
+
+        content = result["content"] || result[:content]
+
+        if is_binary(id) do
+          Context.tool_result(id, content || "")
+        else
+          nil
+        end
+      end
+
+      defp normalize_tool_result(tool_call_id, {:ok, content, _raw}) do
+        %{
+          tool_call_id: tool_call_id,
+          content: content,
+          is_error: false
+        }
+      end
+
+      defp normalize_tool_result(tool_call_id, {:error, content}) do
+        %{
+          tool_call_id: tool_call_id,
+          content: content,
+          is_error: true
+        }
       end
       """)
     end
@@ -700,7 +698,14 @@ if Code.ensure_loaded?(Igniter) do
                add_new_publish(zipper, :create, """
                 publish :create, ["messages", :conversation_id] do
                   transform fn %{data: message} ->
-                    %{text: message.text, id: message.id, source: message.source}
+                    %{
+                      text: message.text,
+                      id: message.id,
+                      source: message.source,
+                      complete: message.complete,
+                      tool_calls: message.tool_calls,
+                      tool_results: message.tool_results
+                    }
                   end
                 end
                """),
@@ -708,7 +713,14 @@ if Code.ensure_loaded?(Igniter) do
                add_new_publish(zipper, :upsert_response, """
                 publish :upsert_response, ["messages", :conversation_id] do
                   transform fn %{data: message} ->
-                    %{text: message.text, id: message.id, source: message.source}
+                    %{
+                      text: message.text,
+                      id: message.id,
+                      source: message.source,
+                      complete: message.complete,
+                      tool_calls: message.tool_calls,
+                      tool_results: message.tool_results
+                    }
                   end
                 end
                """) do
@@ -1025,29 +1037,23 @@ if Code.ensure_loaded?(Igniter) do
       case to_string(provider) do
         "openai" ->
           %{
-            alias: "ChatOpenAI",
-            module: "LangChain.ChatModels.ChatOpenAI",
             env_var: "OPENAI_API_KEY",
-            langchain_key: :openai_key,
-            model: "gpt-4o"
+            req_llm_key: :openai_api_key,
+            model: "openai:gpt-4o"
           }
 
         "gemini" ->
           %{
-            alias: "ChatGoogleAI",
-            module: "LangChain.ChatModels.ChatGoogleAI",
             env_var: "GOOGLE_API_KEY",
-            langchain_key: :google_ai_key,
-            model: "gemini-1.5-pro"
+            req_llm_key: :google_api_key,
+            model: "google:gemini-1.5-pro"
           }
 
         _ ->
           %{
-            alias: "ChatAnthropic",
-            module: "LangChain.ChatModels.ChatAnthropic",
             env_var: "ANTHROPIC_API_KEY",
-            langchain_key: :anthropic_key,
-            model: "claude-opus-4-6"
+            req_llm_key: :anthropic_api_key,
+            model: "anthropic:claude-sonnet-4-5"
           }
       end
     end
@@ -1058,14 +1064,14 @@ if Code.ensure_loaded?(Igniter) do
 
       api_key_code =
         quote do
-          fn -> System.fetch_env!(unquote(env_var)) end
+          System.get_env(unquote(env_var))
         end
 
       igniter
       |> Igniter.Project.Config.configure_new(
         "runtime.exs",
-        :langchain,
-        [provider.langchain_key],
+        :req_llm,
+        [provider.req_llm_key],
         {:code, api_key_code}
       )
       |> Igniter.Project.IgniterConfig.add_extension(Igniter.Extensions.Phoenix)
@@ -1186,14 +1192,47 @@ if Code.ensure_loaded?(Igniter) do
           "list_conversations"
         end
 
+      actor_required? = !!user
+
+      list_conversations_call =
+        if user do
+          "#{inspect(chat)}.#{interface_name}!(actor: socket.assigns.current_user)"
+        else
+          "#{inspect(chat)}.#{interface_name}!()"
+        end
+
+      get_conversation_call =
+        if user do
+          "#{inspect(chat)}.get_conversation!(conversation_id, actor: socket.assigns.current_user)"
+        else
+          "#{inspect(chat)}.get_conversation!(conversation_id)"
+        end
+
+      form_with_conversation_call =
+        if user do
+          "#{inspect(chat)}.form_to_create_message(actor: socket.assigns.current_user, private_arguments: %{conversation_id: socket.assigns.conversation.id})"
+        else
+          "#{inspect(chat)}.form_to_create_message(private_arguments: %{conversation_id: socket.assigns.conversation.id})"
+        end
+
+      form_without_conversation_call =
+        if user do
+          "#{inspect(chat)}.form_to_create_message(actor: socket.assigns.current_user)"
+        else
+          "#{inspect(chat)}.form_to_create_message()"
+        end
+
       """
       use #{web_module}, :live_view
+      @actor_required? #{actor_required?}
       #{on_mount}
         def render(assigns) do
           ~H\"""
           <div class="drawer md:drawer-open bg-base-200 min-h-dvh max-h-dvh">
             <input id="ash-ai-drawer" type="checkbox" class="drawer-toggle" />
             <div class="drawer-content flex flex-col">
+              <.flash kind={:info} flash={@flash} />
+              <.flash kind={:error} flash={@flash} />
               <div class="navbar bg-base-300 w-full">
                 <div class="flex-none md:hidden">
                   <label for="ash-ai-drawer" aria-label="open sidebar" class="btn btn-square btn-ghost">
@@ -1252,14 +1291,50 @@ if Code.ensure_loaded?(Igniter) do
                           <.icon name="hero-user-solid" class="block" />
                         </div>
                       </div>
-                      <div class="chat-bubble">
-                        <%= to_markdown(message.text) %>
+                      <div
+                        :if={message.source == :agent && tool_calls(message) != []}
+                        class="mt-2 flex max-w-[36rem] flex-wrap gap-1 text-[11px] opacity-80"
+                      >
+                        <%= for tool_call <- tool_calls(message) do %>
+                          <span class="badge badge-outline badge-info">
+                            tool: {tool_call.name}
+                          </span>
+                        <% end %>
+                      </div>
+                      <div
+                        :if={message.source == :agent && tool_results(message) != []}
+                        class="chat-footer mt-1 flex max-w-[36rem] flex-col gap-1"
+                      >
+                        <%= for tool_result <- tool_results(message) do %>
+                          <div
+                            class={[
+                              "rounded px-2 py-1 text-xs leading-relaxed break-words",
+                              tool_result.is_error && "bg-error/20",
+                              !tool_result.is_error && "bg-base-300"
+                            ]}
+                          >
+                            <span class="font-semibold">
+                              {if tool_result.is_error, do: "tool_error", else: "tool_result"}
+                            </span>
+                            <span :if={tool_result.name}> ({tool_result.name})</span>
+                            <span class="break-words">
+                              : {tool_result_preview(tool_result.content)}
+                            </span>
+                          </div>
+                        <% end %>
+                      </div>
+                      <div :if={String.trim(message.text || "") != ""} class="chat-bubble">
+                        <%= to_markdown(message.text || "") %>
                       </div>
                     </div>
                   <% end %>
                 </div>
               </div>
-              <div class="p-4 border-t h-16">
+              <div :if={@agent_responding} class="px-4 py-2 text-xs opacity-80 flex items-center gap-2">
+                <span class="loading loading-dots loading-sm" />
+                <span>AshAi is responding...</span>
+              </div>
+              <div class="p-4 border-t">
                 <.form
                   :let={form}
                   for={@message_form}
@@ -1330,23 +1405,38 @@ if Code.ensure_loaded?(Igniter) do
         def mount(_params, _session, socket) do
           socket = assign_new(socket, :current_user, fn -> nil end)
 
-          #{inspect(endpoint)}.subscribe("chat:conversations:\#{socket.assigns.current_user.id}")
+          if socket.assigns.current_user do
+            #{inspect(endpoint)}.subscribe("chat:conversations:\#{socket.assigns.current_user.id}")
+          end
+
+          conversations =
+            if @actor_required? && is_nil(socket.assigns.current_user) do
+              []
+            else
+              #{list_conversations_call}
+            end
 
           socket =
             socket
             |> assign(:page_title, "Chat")
-            |> stream(
-              :conversations,
-              #{inspect(chat)}.#{interface_name}!(actor: socket.assigns.current_user)
-            )
+            |> stream(:conversations, conversations)
+            |> assign(:agent_responding, false)
             |> assign(:messages, [])
 
           {:ok, socket}
         end
 
         def handle_params(%{"conversation_id" => conversation_id}, _, socket) do
+          if @actor_required? && is_nil(socket.assigns.current_user) do
+            {:noreply,
+             socket
+             |> put_flash(:error, "You must sign in to access conversations")
+             |> push_navigate(to: ~p"#{route}")}
+          else
           conversation =
-            #{inspect(chat)}.get_conversation!(conversation_id, actor: socket.assigns.current_user)
+            #{get_conversation_call}
+
+          messages = #{inspect(chat)}.message_history!(conversation.id, stream?: true)
 
           cond do
             socket.assigns[:conversation] && socket.assigns[:conversation].id == conversation.id ->
@@ -1361,9 +1451,11 @@ if Code.ensure_loaded?(Igniter) do
 
           socket
           |> assign(:conversation, conversation)
-          |> stream(:messages, #{inspect(chat)}.message_history!(conversation.id, stream?: true))
+          |> assign(:agent_responding, agent_response_pending?(messages))
+          |> stream(:messages, messages)
           |> assign_message_form()
           |> then(&{:noreply, &1})
+          end
         end
 
         def handle_params(_, _, socket) do
@@ -1373,6 +1465,7 @@ if Code.ensure_loaded?(Igniter) do
 
           socket
           |> assign(:conversation, nil)
+          |> assign(:agent_responding, false)
           |> stream(:messages, [])
           |> assign_message_form()
           |> then(&{:noreply, &1})
@@ -1383,21 +1476,26 @@ if Code.ensure_loaded?(Igniter) do
         end
 
         def handle_event("send_message", %{"form" => params}, socket) do
+          if @actor_required? && is_nil(socket.assigns.current_user) do
+            {:noreply, put_flash(socket, :error, "You must sign in to send messages")}
+          else
           case AshPhoenix.Form.submit(socket.assigns.message_form, params: params) do
             {:ok, message} ->
               if socket.assigns.conversation do
                 socket
+                |> assign(:agent_responding, true)
                 |> assign_message_form()
                 |> stream_insert(:messages, message, at: 0)
                 |> then(&{:noreply, &1})
               else
                 {:noreply,
                  socket
-                 |> push_navigate(to: ~p"#{route}/chat/\#{message.conversation_id}")}
+                 |> push_navigate(to: ~p"#{route}/\#{message.conversation_id}")}
               end
 
             {:error, form} ->
               {:noreply, assign(socket, :message_form, form)}
+          end
           end
         end
 
@@ -1409,7 +1507,10 @@ if Code.ensure_loaded?(Igniter) do
               socket
             ) do
           if socket.assigns.conversation && socket.assigns.conversation.id == conversation_id do
-            {:noreply, stream_insert(socket, :messages, message, at: 0)}
+            {:noreply,
+             socket
+             |> stream_insert(:messages, message, at: 0)
+             |> update_agent_responding(message)}
           else
             {:noreply, socket}
           end
@@ -1435,13 +1536,10 @@ if Code.ensure_loaded?(Igniter) do
         defp assign_message_form(socket) do
           form =
             if socket.assigns.conversation do
-              #{inspect(chat)}.form_to_create_message(
-                actor: socket.assigns.current_user,
-                private_arguments: %{conversation_id: socket.assigns.conversation.id}
-              )
+              #{form_with_conversation_call}
               |> to_form()
             else
-              #{inspect(chat)}.form_to_create_message(actor: socket.assigns.current_user)
+              #{form_without_conversation_call}
               |> to_form()
             end
 
@@ -1450,6 +1548,115 @@ if Code.ensure_loaded?(Igniter) do
             :message_form,
             form
           )
+        end
+
+        defp tool_calls(message) do
+          message
+          |> message_field(:tool_calls)
+          |> List.wrap()
+          |> Enum.flat_map(fn call ->
+            name = message_field(call, :name)
+
+            if is_binary(name) do
+              [
+                %{
+                  id:
+                    message_field(call, :id) || message_field(call, :call_id) ||
+                      "call_unknown",
+                  name: name
+                }
+              ]
+            else
+              []
+            end
+          end)
+        end
+
+        defp tool_results(message) do
+          calls_by_id =
+            tool_calls(message)
+            |> Map.new(fn call -> {call.id, call.name} end)
+
+          message
+          |> message_field(:tool_results)
+          |> List.wrap()
+          |> Enum.flat_map(fn result ->
+            id = message_field(result, :tool_call_id) || message_field(result, :id)
+            content = message_field(result, :content)
+            is_error = message_field(result, :is_error) in [true, "true"]
+
+            if is_binary(id) || not is_nil(content) do
+              [
+                %{
+                  id: id || "tool_result",
+                  name: if(is_binary(id), do: Map.get(calls_by_id, id), else: nil),
+                  content: content,
+                  is_error: is_error
+                }
+              ]
+            else
+              []
+            end
+          end)
+        end
+
+        defp tool_result_preview(content) do
+          content
+          |> normalize_text_content()
+          |> String.replace(~r/\\s+/, " ")
+          |> String.trim()
+          |> String.slice(0, 180)
+        end
+
+        defp normalize_text_content(nil), do: ""
+        defp normalize_text_content(content) when is_binary(content) do
+          case Jason.decode(content) do
+            {:ok, decoded} -> normalize_text_content(decoded)
+            {:error, _} -> content
+          end
+        end
+
+        defp normalize_text_content(content) when is_map(content) or is_list(content) do
+          Jason.encode!(content)
+        end
+
+        defp normalize_text_content(content), do: inspect(content)
+
+        defp message_field(message, key) do
+          case message do
+            %{^key => value} ->
+              value
+
+            %{} ->
+              Map.get(message, Atom.to_string(key))
+
+            _ ->
+              nil
+          end
+        end
+
+        defp message_source(message), do: message_field(message, :source)
+
+        defp message_complete?(message), do: message_field(message, :complete) in [true, "true"]
+
+        defp update_agent_responding(socket, message) do
+          case message_source(message) do
+            :user ->
+              assign(socket, :agent_responding, true)
+
+            :agent ->
+              assign(socket, :agent_responding, !message_complete?(message))
+
+            _ ->
+              socket
+          end
+        end
+
+        defp agent_response_pending?(messages) do
+          case Enum.find(messages, fn message -> message_source(message) in [:user, :agent] end) do
+            nil -> false
+            message -> message_source(message) == :user || !message_complete?(message)
+          end
         end
 
         defp to_markdown(text) do
@@ -1494,6 +1701,13 @@ if Code.ensure_loaded?(Igniter) do
           "list_conversations"
         end
 
+      actor_required? =
+        if user do
+          "true"
+        else
+          "false"
+        end
+
       """
       use #{inspect(web_module)}, :live_component
 
@@ -1507,15 +1721,20 @@ if Code.ensure_loaded?(Igniter) do
 
         socket =
           if !socket.assigns[:initialized] do
+            conversations =
+              if #{actor_required?} && is_nil(socket.assigns.current_user) do
+                []
+              else
+                #{inspect(chat)}.#{interface_name}!(actor: socket.assigns.current_user)
+              end
+
             socket
             |> assign(:initialized, true)
             |> assign_new(:hide_sidebar, fn -> false end)
             |> assign_new(:conversation, fn -> nil end)
             |> assign_new(:conversation_id, fn -> nil end)
-            |> stream(
-              :conversations,
-              #{inspect(chat)}.#{interface_name}!(actor: socket.assigns.current_user)
-            )
+            |> assign_new(:agent_responding, fn -> false end)
+            |> stream(:conversations, conversations)
             |> stream(:messages, [])
             |> assign_message_form()
           else
@@ -1548,7 +1767,9 @@ if Code.ensure_loaded?(Igniter) do
           end
       \"\"\"
       def subscribe(current_user, _socket) do
-        #{inspect(endpoint)}.subscribe("chat:conversations:\#{current_user.id}")
+        if current_user do
+          #{inspect(endpoint)}.subscribe("chat:conversations:\#{current_user.id}")
+        end
       end
 
       @impl true
@@ -1586,6 +1807,8 @@ if Code.ensure_loaded?(Igniter) do
           </div>
 
           <div class="flex-1 flex flex-col">
+            <.flash kind={:info} flash={@flash} />
+            <.flash kind={:error} flash={@flash} />
             <div class="navbar bg-base-300 w-full">
               <img
                 src="https://github.com/ash-project/ash_ai/blob/main/logos/ash_ai.png?raw=true"
@@ -1627,14 +1850,50 @@ if Code.ensure_loaded?(Igniter) do
                         <.icon name="hero-user-solid" class="block" />
                       </div>
                     </div>
-                    <div class="chat-bubble">
-                      <%= to_markdown(message.text) %>
+                    <div
+                      :if={message.source == :agent && tool_calls(message) != []}
+                      class="mt-2 flex max-w-[36rem] flex-wrap gap-1 text-[11px] opacity-80"
+                    >
+                      <%= for tool_call <- tool_calls(message) do %>
+                        <span class="badge badge-outline badge-info">
+                          tool: {tool_call.name}
+                        </span>
+                      <% end %>
+                    </div>
+                    <div
+                      :if={message.source == :agent && tool_results(message) != []}
+                      class="chat-footer mt-1 flex max-w-[36rem] flex-col gap-1"
+                    >
+                      <%= for tool_result <- tool_results(message) do %>
+                        <div
+                          class={[
+                            "rounded px-2 py-1 text-xs leading-relaxed break-words",
+                            tool_result.is_error && "bg-error/20",
+                            !tool_result.is_error && "bg-base-300"
+                          ]}
+                        >
+                          <span class="font-semibold">
+                            {if tool_result.is_error, do: "tool_error", else: "tool_result"}
+                          </span>
+                          <span :if={tool_result.name}> ({tool_result.name})</span>
+                          <span class="break-words">
+                            : {tool_result_preview(tool_result.content)}
+                          </span>
+                        </div>
+                      <% end %>
+                    </div>
+                    <div :if={String.trim(message.text || "") != ""} class="chat-bubble">
+                      <%= to_markdown(message.text || "") %>
                     </div>
                   </div>
                 <% end %>
               </div>
             </div>
-            <div class="p-4 border-t h-16">
+            <div :if={@agent_responding} class="px-4 py-2 text-xs opacity-80 flex items-center gap-2">
+              <span class="loading loading-dots loading-sm" />
+              <span>AshAi is responding...</span>
+            </div>
+            <div class="p-4 border-t">
               <.form
                 :let={form}
                 for={@message_form}
@@ -1672,20 +1931,25 @@ if Code.ensure_loaded?(Igniter) do
 
       @impl true
       def handle_event("send_message", %{"form" => params}, socket) do
-        case AshPhoenix.Form.submit(socket.assigns.message_form, params: params) do
-          {:ok, message} ->
-            if socket.assigns.conversation do
-              socket
-              |> assign_message_form()
-              |> stream_insert(:messages, message, at: 0)
-              |> then(&{:noreply, &1})
-            else
-              send(self(), {:chat_component_navigate, message.conversation_id})
-              {:noreply, assign_message_form(socket)}
-            end
+        if #{actor_required?} && is_nil(socket.assigns.current_user) do
+          {:noreply, put_flash(socket, :error, "You must sign in to send messages")}
+        else
+          case AshPhoenix.Form.submit(socket.assigns.message_form, params: params) do
+            {:ok, message} ->
+              if socket.assigns.conversation do
+                socket
+                |> assign(:agent_responding, true)
+                |> assign_message_form()
+                |> stream_insert(:messages, message, at: 0)
+                |> then(&{:noreply, &1})
+              else
+                send(self(), {:chat_component_navigate, message.conversation_id})
+                {:noreply, assign_message_form(socket)}
+              end
 
-          {:error, form} ->
-            {:noreply, assign(socket, :message_form, form)}
+            {:error, form} ->
+              {:noreply, assign(socket, :message_form, form)}
+          end
         end
       end
 
@@ -1702,15 +1966,24 @@ if Code.ensure_loaded?(Igniter) do
       end
 
       defp load_conversation(socket, conversation_id) do
-        conversation =
-          #{inspect(chat)}.get_conversation!(conversation_id, actor: socket.assigns.current_user)
+        if #{actor_required?} && is_nil(socket.assigns.current_user) do
+          socket
+          |> put_flash(:error, "You must sign in to access conversations")
+          |> clear_conversation()
+        else
+          conversation =
+            #{inspect(chat)}.get_conversation!(conversation_id, actor: socket.assigns.current_user)
 
-        #{inspect(endpoint)}.subscribe("chat:messages:\#{conversation.id}")
+          messages = #{inspect(chat)}.message_history!(conversation.id, stream?: true)
 
-        socket
-        |> assign(:conversation, conversation)
-        |> stream(:messages, #{inspect(chat)}.message_history!(conversation.id, stream?: true), reset: true)
-        |> assign_message_form()
+          #{inspect(endpoint)}.subscribe("chat:messages:\#{conversation.id}")
+
+          socket
+          |> assign(:conversation, conversation)
+          |> assign(:agent_responding, agent_response_pending?(messages))
+          |> stream(:messages, messages, reset: true)
+          |> assign_message_form()
+        end
       end
 
       defp clear_conversation(socket) do
@@ -1720,6 +1993,7 @@ if Code.ensure_loaded?(Igniter) do
 
         socket
         |> assign(:conversation, nil)
+        |> assign(:agent_responding, false)
         |> stream(:messages, [], reset: true)
         |> assign_message_form()
       end
@@ -1733,7 +2007,9 @@ if Code.ensure_loaded?(Igniter) do
         payload: message
       }) do
         if socket.assigns.conversation && socket.assigns.conversation.id == conversation_id do
-          stream_insert(socket, :messages, message, at: 0)
+          socket
+          |> stream_insert(:messages, message, at: 0)
+          |> update_agent_responding(message)
         else
           socket
         end
@@ -1781,6 +2057,115 @@ if Code.ensure_loaded?(Igniter) do
           :message_form,
           form
         )
+      end
+
+      defp tool_calls(message) do
+        message
+        |> message_field(:tool_calls)
+        |> List.wrap()
+        |> Enum.flat_map(fn call ->
+          name = message_field(call, :name)
+
+          if is_binary(name) do
+            [
+              %{
+                id:
+                  message_field(call, :id) || message_field(call, :call_id) ||
+                    "call_unknown",
+                name: name
+              }
+            ]
+          else
+            []
+          end
+        end)
+      end
+
+      defp tool_results(message) do
+        calls_by_id =
+          tool_calls(message)
+          |> Map.new(fn call -> {call.id, call.name} end)
+
+        message
+        |> message_field(:tool_results)
+        |> List.wrap()
+        |> Enum.flat_map(fn result ->
+          id = message_field(result, :tool_call_id) || message_field(result, :id)
+          content = message_field(result, :content)
+          is_error = message_field(result, :is_error) in [true, "true"]
+
+          if is_binary(id) || not is_nil(content) do
+            [
+              %{
+                id: id || "tool_result",
+                name: if(is_binary(id), do: Map.get(calls_by_id, id), else: nil),
+                content: content,
+                is_error: is_error
+              }
+            ]
+          else
+            []
+          end
+        end)
+      end
+
+      defp tool_result_preview(content) do
+        content
+        |> normalize_text_content()
+        |> String.replace(~r/\\s+/, " ")
+        |> String.trim()
+        |> String.slice(0, 180)
+      end
+
+      defp normalize_text_content(nil), do: ""
+      defp normalize_text_content(content) when is_binary(content) do
+        case Jason.decode(content) do
+          {:ok, decoded} -> normalize_text_content(decoded)
+          {:error, _} -> content
+        end
+      end
+
+      defp normalize_text_content(content) when is_map(content) or is_list(content) do
+        Jason.encode!(content)
+      end
+
+      defp normalize_text_content(content), do: inspect(content)
+
+      defp message_field(message, key) do
+        case message do
+          %{^key => value} ->
+            value
+
+          %{} ->
+            Map.get(message, Atom.to_string(key))
+
+          _ ->
+            nil
+        end
+      end
+
+      defp message_source(message), do: message_field(message, :source)
+
+      defp message_complete?(message), do: message_field(message, :complete) in [true, "true"]
+
+      defp update_agent_responding(socket, message) do
+        case message_source(message) do
+          :user ->
+            assign(socket, :agent_responding, true)
+
+          :agent ->
+            assign(socket, :agent_responding, !message_complete?(message))
+
+          _ ->
+            socket
+        end
+      end
+
+      defp agent_response_pending?(messages) do
+        case Enum.find(messages, fn message -> message_source(message) in [:user, :agent] end) do
+          nil -> false
+          message -> message_source(message) == :user || !message_complete?(message)
+        end
       end
 
       defp to_markdown(text) do
