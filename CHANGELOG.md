@@ -30,6 +30,7 @@ See [Conventional Commits](Https://conventionalcommits.org) for commit guideline
 
 ### Migration Notes
 
+* Full guide: [LangChain to ReqLLM Migration Guide](/documentation/topics/langchain-to-reqllm-migration.md)
 * Replace LangChain model structs with ReqLLM model specs, e.g.:
   * `LangChain.ChatModels.ChatOpenAI.new!(%{model: "gpt-4o"})`
   * becomes `"openai:gpt-4o"`

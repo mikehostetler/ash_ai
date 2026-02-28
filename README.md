@@ -332,6 +332,7 @@ config :req_llm, google_api_key: System.fetch_env!("GOOGLE_API_KEY")
 
 For AshAi-specific model notes:
 - [Google Gemini 2.5](/documentation/models/gemini.md)
+- [LangChain to ReqLLM Migration Guide](/documentation/topics/langchain-to-reqllm-migration.md)
 
 ## Vectorization
 
