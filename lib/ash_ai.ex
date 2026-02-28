@@ -200,7 +200,8 @@ defmodule AshAi do
           """
         ],
         tools: [
-          type: {:wrap_list, :atom},
+          type: {:or, [:boolean, {:wrap_list, :atom}]},
+          default: true,
           doc: """
            A list of tool names. If not set. Defaults to everything. If `actions` is also set, both are applied as filters.
           """
@@ -721,12 +722,10 @@ defmodule AshAi do
       end
     end)
     |> then(fn tools ->
-      if allowed_tools = opts.tools do
-        Enum.filter(tools, fn tool ->
-          tool.name in List.wrap(allowed_tools)
-        end)
-      else
-        tools
+      case opts.tools do
+        true -> tools
+        false -> []
+        allowed_tools -> Enum.filter(tools, &(&1.name in allowed_tools))
       end
     end)
     |> Enum.filter(
@@ -768,20 +767,18 @@ defmodule AshAi do
     end
   rescue
     e ->
-      Logger.error(
-        """
-        Error raised while checking permissions for #{inspect(resource)}.#{action.name}
+      Logger.error("""
+      Error raised while checking permissions for #{inspect(resource)}.#{action.name}
 
-        When checking permissions, we check the action using an empty input.
-        Your action should be prepared for this.
+      When checking permissions, we check the action using an empty input.
+      Your action should be prepared for this.
 
-        For create/update/destroy actions, you may need to add `only_when_valid?: true`
-        to the changes, for other things, you may want to check validity of the changeset,
-        query or action input.
+      For create/update/destroy actions, you may need to add `only_when_valid?: true`
+      to the changes, for other things, you may want to check validity of the changeset,
+      query or action input.
 
-        #{Exception.format(:error, e, __STACKTRACE__)}
-        """
-      )
+      #{Exception.format(:error, e, __STACKTRACE__)}
+      """)
 
       false
   end

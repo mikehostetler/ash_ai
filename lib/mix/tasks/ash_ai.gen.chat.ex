@@ -85,7 +85,7 @@ if Code.ensure_loaded?(Igniter) do
           live_component: :boolean,
           yes: :boolean
         ],
-        defaults: [live: false, live_component: false, yes: false]
+        defaults: [live: false, live_component: false, yes: false, provider: "anthropic"]
       }
     end
 
@@ -117,8 +117,9 @@ if Code.ensure_loaded?(Igniter) do
       |> Igniter.add_notice("""
       AshAi:
 
-      The chat feature has been generated using the #{to_string(igniter.args.options[:provider] || "anthropic")} provider via LangChain.
+      The chat feature has been generated using the #{to_string(igniter.args.options[:provider])} provider via LangChain.
       Please see LangChain's documentation if you need to configure a different model or provider settings.
+      All tools in your application are available in the chat by default. Change tools: true to tools: [:a, :list, :of, :tools] to change that.
       """)
       |> maybe_add_live_component_notice(chat)
     end
@@ -540,7 +541,7 @@ if Code.ensure_loaded?(Igniter) do
           |> LLMChain.add_messages(message_chain)
           # add the names of tools you want available in your conversation here.
           # i.e tools: [:lookup_weather]
-          |> AshAi.setup_ash_ai(otp_app: :#{otp_app}, tools: [], actor: context.actor)
+          |> AshAi.setup_ash_ai(otp_app: :#{otp_app}, tools: true, actor: context.actor)
           |> LLMChain.add_callback(%{
             on_llm_new_delta: fn  _chain, deltas ->
               deltas
@@ -1021,7 +1022,7 @@ if Code.ensure_loaded?(Igniter) do
     end
 
     defp llm_provider_config(provider) do
-      case to_string(provider || "anthropic") do
+      case to_string(provider) do
         "openai" ->
           %{
             alias: "ChatOpenAI",

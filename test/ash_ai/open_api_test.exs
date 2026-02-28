@@ -409,7 +409,9 @@ defmodule AshAi.OpenApiTest do
                        }
                      },
                      additionalProperties: false
-                   }
+                   },
+                   is_distinct_from: %{type: :string},
+                   is_not_distinct_from: %{type: :string}
                  },
                  additionalProperties: false
                },
@@ -422,6 +424,8 @@ defmodule AshAi.OpenApiTest do
                    less_than: %{type: :integer},
                    greater_than: %{type: :integer},
                    not_eq: %{type: :integer},
+                   is_distinct_from: %{type: :string},
+                   is_not_distinct_from: %{type: :string},
                    less_than_or_equal: %{type: :integer},
                    greater_than_or_equal: %{type: :integer}
                  },
