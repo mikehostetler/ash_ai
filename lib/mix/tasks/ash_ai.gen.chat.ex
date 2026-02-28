@@ -1042,7 +1042,7 @@ if Code.ensure_loaded?(Igniter) do
 
       api_key_code =
         quote do
-          System.fetch_env!(unquote(env_var))
+          System.get_env(unquote(env_var))
         end
 
       igniter
@@ -1170,8 +1170,39 @@ if Code.ensure_loaded?(Igniter) do
           "list_conversations"
         end
 
+      actor_required? = !!user
+
+      list_conversations_call =
+        if user do
+          "#{inspect(chat)}.#{interface_name}!(actor: socket.assigns.current_user)"
+        else
+          "#{inspect(chat)}.#{interface_name}!()"
+        end
+
+      get_conversation_call =
+        if user do
+          "#{inspect(chat)}.get_conversation!(conversation_id, actor: socket.assigns.current_user)"
+        else
+          "#{inspect(chat)}.get_conversation!(conversation_id)"
+        end
+
+      form_with_conversation_call =
+        if user do
+          "#{inspect(chat)}.form_to_create_message(actor: socket.assigns.current_user, private_arguments: %{conversation_id: socket.assigns.conversation.id})"
+        else
+          "#{inspect(chat)}.form_to_create_message(private_arguments: %{conversation_id: socket.assigns.conversation.id})"
+        end
+
+      form_without_conversation_call =
+        if user do
+          "#{inspect(chat)}.form_to_create_message(actor: socket.assigns.current_user)"
+        else
+          "#{inspect(chat)}.form_to_create_message()"
+        end
+
       """
       use #{web_module}, :live_view
+      @actor_required? #{actor_required?}
       #{on_mount}
         def render(assigns) do
           ~H\"""
@@ -1314,23 +1345,35 @@ if Code.ensure_loaded?(Igniter) do
         def mount(_params, _session, socket) do
           socket = assign_new(socket, :current_user, fn -> nil end)
 
-          #{inspect(endpoint)}.subscribe("chat:conversations:\#{socket.assigns.current_user.id}")
+          if socket.assigns.current_user do
+            #{inspect(endpoint)}.subscribe("chat:conversations:\#{socket.assigns.current_user.id}")
+          end
+
+          conversations =
+            if @actor_required? && is_nil(socket.assigns.current_user) do
+              []
+            else
+              #{list_conversations_call}
+            end
 
           socket =
             socket
             |> assign(:page_title, "Chat")
-            |> stream(
-              :conversations,
-              #{inspect(chat)}.#{interface_name}!(actor: socket.assigns.current_user)
-            )
+            |> stream(:conversations, conversations)
             |> assign(:messages, [])
 
           {:ok, socket}
         end
 
         def handle_params(%{"conversation_id" => conversation_id}, _, socket) do
+          if @actor_required? && is_nil(socket.assigns.current_user) do
+            {:noreply,
+             socket
+             |> put_flash(:error, "You must sign in to access conversations")
+             |> push_navigate(to: ~p"#{route}")}
+          else
           conversation =
-            #{inspect(chat)}.get_conversation!(conversation_id, actor: socket.assigns.current_user)
+            #{get_conversation_call}
 
           cond do
             socket.assigns[:conversation] && socket.assigns[:conversation].id == conversation.id ->
@@ -1348,6 +1391,7 @@ if Code.ensure_loaded?(Igniter) do
           |> stream(:messages, #{inspect(chat)}.message_history!(conversation.id, stream?: true))
           |> assign_message_form()
           |> then(&{:noreply, &1})
+          end
         end
 
         def handle_params(_, _, socket) do
@@ -1367,6 +1411,9 @@ if Code.ensure_loaded?(Igniter) do
         end
 
         def handle_event("send_message", %{"form" => params}, socket) do
+          if @actor_required? && is_nil(socket.assigns.current_user) do
+            {:noreply, put_flash(socket, :error, "You must sign in to send messages")}
+          else
           case AshPhoenix.Form.submit(socket.assigns.message_form, params: params) do
             {:ok, message} ->
               if socket.assigns.conversation do
@@ -1377,11 +1424,12 @@ if Code.ensure_loaded?(Igniter) do
               else
                 {:noreply,
                  socket
-                 |> push_navigate(to: ~p"#{route}/chat/\#{message.conversation_id}")}
+                 |> push_navigate(to: ~p"#{route}/\#{message.conversation_id}")}
               end
 
             {:error, form} ->
               {:noreply, assign(socket, :message_form, form)}
+          end
           end
         end
 
@@ -1419,13 +1467,10 @@ if Code.ensure_loaded?(Igniter) do
         defp assign_message_form(socket) do
           form =
             if socket.assigns.conversation do
-              #{inspect(chat)}.form_to_create_message(
-                actor: socket.assigns.current_user,
-                private_arguments: %{conversation_id: socket.assigns.conversation.id}
-              )
+              #{form_with_conversation_call}
               |> to_form()
             else
-              #{inspect(chat)}.form_to_create_message(actor: socket.assigns.current_user)
+              #{form_without_conversation_call}
               |> to_form()
             end
 
@@ -1478,6 +1523,13 @@ if Code.ensure_loaded?(Igniter) do
           "list_conversations"
         end
 
+      actor_required? =
+        if user do
+          "true"
+        else
+          "false"
+        end
+
       """
       use #{inspect(web_module)}, :live_component
 
@@ -1491,15 +1543,19 @@ if Code.ensure_loaded?(Igniter) do
 
         socket =
           if !socket.assigns[:initialized] do
+            conversations =
+              if #{actor_required?} && is_nil(socket.assigns.current_user) do
+                []
+              else
+                #{inspect(chat)}.#{interface_name}!(actor: socket.assigns.current_user)
+              end
+
             socket
             |> assign(:initialized, true)
             |> assign_new(:hide_sidebar, fn -> false end)
             |> assign_new(:conversation, fn -> nil end)
             |> assign_new(:conversation_id, fn -> nil end)
-            |> stream(
-              :conversations,
-              #{inspect(chat)}.#{interface_name}!(actor: socket.assigns.current_user)
-            )
+            |> stream(:conversations, conversations)
             |> stream(:messages, [])
             |> assign_message_form()
           else
@@ -1532,7 +1588,9 @@ if Code.ensure_loaded?(Igniter) do
           end
       \"\"\"
       def subscribe(current_user, _socket) do
-        #{inspect(endpoint)}.subscribe("chat:conversations:\#{current_user.id}")
+        if current_user do
+          #{inspect(endpoint)}.subscribe("chat:conversations:\#{current_user.id}")
+        end
       end
 
       @impl true
@@ -1656,20 +1714,24 @@ if Code.ensure_loaded?(Igniter) do
 
       @impl true
       def handle_event("send_message", %{"form" => params}, socket) do
-        case AshPhoenix.Form.submit(socket.assigns.message_form, params: params) do
-          {:ok, message} ->
-            if socket.assigns.conversation do
-              socket
-              |> assign_message_form()
-              |> stream_insert(:messages, message, at: 0)
-              |> then(&{:noreply, &1})
-            else
-              send(self(), {:chat_component_navigate, message.conversation_id})
-              {:noreply, assign_message_form(socket)}
-            end
+        if #{actor_required?} && is_nil(socket.assigns.current_user) do
+          {:noreply, put_flash(socket, :error, "You must sign in to send messages")}
+        else
+          case AshPhoenix.Form.submit(socket.assigns.message_form, params: params) do
+            {:ok, message} ->
+              if socket.assigns.conversation do
+                socket
+                |> assign_message_form()
+                |> stream_insert(:messages, message, at: 0)
+                |> then(&{:noreply, &1})
+              else
+                send(self(), {:chat_component_navigate, message.conversation_id})
+                {:noreply, assign_message_form(socket)}
+              end
 
-          {:error, form} ->
-            {:noreply, assign(socket, :message_form, form)}
+            {:error, form} ->
+              {:noreply, assign(socket, :message_form, form)}
+          end
         end
       end
 
@@ -1686,15 +1748,21 @@ if Code.ensure_loaded?(Igniter) do
       end
 
       defp load_conversation(socket, conversation_id) do
-        conversation =
-          #{inspect(chat)}.get_conversation!(conversation_id, actor: socket.assigns.current_user)
+        if #{actor_required?} && is_nil(socket.assigns.current_user) do
+          socket
+          |> put_flash(:error, "You must sign in to access conversations")
+          |> clear_conversation()
+        else
+          conversation =
+            #{inspect(chat)}.get_conversation!(conversation_id, actor: socket.assigns.current_user)
 
-        #{inspect(endpoint)}.subscribe("chat:messages:\#{conversation.id}")
+          #{inspect(endpoint)}.subscribe("chat:messages:\#{conversation.id}")
 
-        socket
-        |> assign(:conversation, conversation)
-        |> stream(:messages, #{inspect(chat)}.message_history!(conversation.id, stream?: true), reset: true)
-        |> assign_message_form()
+          socket
+          |> assign(:conversation, conversation)
+          |> stream(:messages, #{inspect(chat)}.message_history!(conversation.id, stream?: true), reset: true)
+          |> assign_message_form()
+        end
       end
 
       defp clear_conversation(socket) do
