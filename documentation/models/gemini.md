@@ -12,14 +12,14 @@ Steps to configure The generated Chat Server to work with Gemini
 In `config/runtime.ex` replace:
 
 ```elixir
-config :langchain, openai_key: fn -> System.fetch_env!("OPENAI_API_KEY") end
+config :req_llm, openai_api_key: System.fetch_env!("OPENAI_API_KEY")
 ```
 
 With:
 
 ```elixir
-config :langchain,
-  google_ai_key: fn -> System.get_env("GEMINI_API_KEY") end
+config :req_llm,
+  google_api_key: System.fetch_env!("GOOGLE_API_KEY")
 ```
 
 
@@ -34,23 +34,13 @@ In
 Replace:
 
 ```elixir
- alias LangChain.ChatModels.ChatOpenAI
-
- ....
-
- llm: ChatOpenAI.new!(%{model: "gpt-4o", stream: true}),
-
+ model: "openai:gpt-4o"
 
 ```
 With:
 
 ```elixir
- alias LangChain.ChatModels.ChatGoogleAI
-
- ...
-
- llm: ChatGoogleAI.new!(%{model: "gemini-2.5-pro", stream: true}),
-
+ model: "google:gemini-2.5-pro"
 ```
 
 

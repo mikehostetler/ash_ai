@@ -153,7 +153,7 @@ mix ash_ai.gen.chat --live
 
 ### Specify your LLM API key
 
-By default, it uses Open AI as the LLM provider so you need to specify your OpenAI API key as an environment variable (eg `OPEN_API_KEY=sk_...`).
+By default, it uses OpenAI as the LLM provider, so set your API key as an environment variable (for example, `OPENAI_API_KEY=sk_...`).
 
 ### Ensure you have Tailwind and DaisyUI
 
@@ -182,8 +182,8 @@ defmodule MyApp.Blog do
 end
 ```
 
-Expose these actions as tools. When you call `AshAi.setup_ash_ai(chain, opts)`, or `AshAi.iex_chat/2`
-it will add those as tool calls to the agent.
+Expose these actions as tools. Use `AshAi.build_tools_and_registry/1` to get ReqLLM tools and callbacks,
+or use `AshAi.ToolLoop.run/2` to execute the full model + tool loop.
 
 ## Expose content as MCP resources
 
@@ -241,11 +241,10 @@ Key distinction:
 
 ### Tool Execution Callbacks
 
-Monitor tool execution in real-time by providing callbacks to `AshAi.setup_ash_ai/2`:
+Monitor tool execution in real-time by providing callbacks to `AshAi.ToolLoop.run/2`:
 
 ```elixir
-chain
-|> AshAi.setup_ash_ai(
+AshAi.ToolLoop.run(messages,
   actor: current_user,
   on_tool_start: fn %AshAi.ToolStartEvent{} = event ->
     # event includes: tool_name, action, resource, arguments, actor, tenant
@@ -280,15 +279,15 @@ action :analyze_sentiment, :atom do
     description "The text for analysis"
   end
 
-  run prompt(
-    LangChain.ChatModels.ChatOpenAI.new!(%{ model: "gpt-4o"}),
+  run prompt("openai:gpt-4o",
     # setting `tools: true` allows it to use all exposed tools in your app
-    tools: true
+    tools: true,
     # alternatively you can restrict it to only a set of tools
     # tools: [:list, :of, :tool, :names]
     # provide an optional prompt, which is an EEx template
-     # prompt: "Analyze the sentiment of the following text: <%= @input.arguments.description %>",
-    # adapter: {Adapter, [some: :opt]}
+    # prompt: "Analyze the sentiment of the following text: <%= @input.arguments.description %>",
+    # optional req_llm override for tests
+    # req_llm: MyApp.MockReqLLM
   )
 end
 ```
@@ -314,24 +313,24 @@ end
 action :parse_job, JobListing do
   argument :raw_content, :string, allow_nil?: false
 
-  run prompt(
-    LangChain.ChatModels.ChatOpenAI.new!(%{model: "gpt-4o-mini"}),
+  run prompt("openai:gpt-4o-mini",
     prompt: "Parse this job listing: <%= @input.arguments.raw_content %>",
     tools: false
   )
 end
 ```
 
-## Adapters
+### Setting up ReqLLM
 
-Adapters are used to determine how a given LLM fulfills a prompt-backed action. The adapter is guessed automatically from the model where possible.
-See `AshAi.Actions.Prompt.Adapter` for more information.
+Configure provider keys under `:req_llm` in `runtime.exs`, for example:
 
-### Setting up LangChain
+```elixir
+config :req_llm, openai_api_key: System.fetch_env!("OPENAI_API_KEY")
+config :req_llm, anthropic_api_key: System.fetch_env!("ANTHROPIC_API_KEY")
+config :req_llm, google_api_key: System.fetch_env!("GOOGLE_API_KEY")
+```
 
-For any langchain models you use, you will need to configure them. See https://hexdocs.pm/langchain/ for more information.
-
-For AshAI Specific changes to use different models:
+For AshAi-specific model notes:
 - [Google Gemini 2.5](/documentation/models/gemini.md)
 
 ## Vectorization
@@ -585,10 +584,10 @@ The below example uses an `hnsw` index, which trades higher memory usage and vec
 
 # How to play with it
 
-1. Setup `LangChain`
-2. Modify a `LangChain` using `AshAi.setup_ash_ai/2` or use `AshAi.iex_chat` (see below)
-2. Run `iex -S mix` and then run `AshAi.iex_chat` to start chatting with your app.
-3. Build your own chat interface. See the implementation of `AshAi.iex_chat` to see how its done.
+1. Setup `ReqLLM` keys (see above)
+2. Use `AshAi.ToolLoop.run/2` or `AshAi.iex_chat/1`
+3. Run `iex -S mix` and then run `AshAi.iex_chat(otp_app: :my_app)` to chat with your app
+4. Build your own chat interface around `AshAi.ToolLoop`
 
 ## Contributing 
 
@@ -599,16 +598,12 @@ The below example uses an `hnsw` index, which trades higher memory usage and vec
 
 ```elixir
 defmodule MyApp.ChatBot do
-  alias LangChain.Chains.LLMChain
-  alias LangChain.ChatModels.ChatOpenAI
-
   def iex_chat(actor \\ nil) do
-    %{
-      llm: ChatOpenAI.new!(%{model: "gpt-4o", stream: true}),
-      verbose: true
-    }
-    |> LLMChain.new!()
-    |> AshAi.iex_chat(actor: actor, otp_app: :my_app)
+    AshAi.iex_chat(
+      actor: actor,
+      otp_app: :my_app,
+      model: "openai:gpt-4o"
+    )
   end
 end
 ```
