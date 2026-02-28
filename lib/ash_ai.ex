@@ -7,7 +7,7 @@ defmodule AshAi do
   Documentation for `AshAi`.
   """
 
-  alias LangChain.Chains.LLMChain
+  alias ReqLLM.Context
 
   defstruct []
 
@@ -299,115 +299,102 @@ defmodule AshAi do
           doc: """
           Whether to use strict schema mode when generating tool parameter schemas.
 
-          When `true` (the default), sets `strict: true` on the LangChain Function and
-          applies OpenAI-compatible strict schema transformation: all objects get
+          When `true` (the default), applies OpenAI-compatible strict schema transformation: all objects get
           `additionalProperties: false`, all properties are included in `required`,
           and optional properties are wrapped in `anyOf: [null, type]`.
 
-          Set to `false` when using providers that do not support `additionalProperties`
-          in function declarations, such as Google Gemini.
+          Set to `false` when using providers that do not support this schema format.
+          For example, Google Gemini rejects `additionalProperties` in function declarations.
 
           When `false`, `additionalProperties` is stripped from the schema and no
           `anyOf` null-wrapping is applied.
+          """
+        ],
+        model: [
+          type: :any,
+          default: "openai:gpt-4o-mini",
+          doc: """
+          The LLM model specification used by ReqLLM.
+
+          Can be:
+          - a string (e.g. `"openai:gpt-4o-mini"`)
+          - a tuple accepted by ReqLLM (e.g. `{:anthropic, [id: "claude-sonnet-4-5"]}`)
+          - a function returning either format
+          """
+        ],
+        req_llm: [
+          type: :atom,
+          default: ReqLLM,
+          doc: """
+          The ReqLLM module to use. Defaults to `ReqLLM`.
+          Useful for tests with a mock ReqLLM module.
+          """
+        ],
+        max_iterations: [
+          type: :pos_integer,
+          default: 10,
+          doc: """
+          Maximum number of tool-calling iterations before terminating.
           """
         ]
       ]
   end
 
-  def functions(opts) when is_list(opts), do: functions(Options.validate!(opts))
+  @doc """
+  Returns ReqLLM tools for the given options.
+  """
+  def list_tools(opts) when is_list(opts), do: list_tools(Options.validate!(opts))
+  def list_tools(opts), do: AshAi.Tools.list(opts)
 
-  def functions(opts) do
+  @doc """
+  Returns `{tools, registry}` for ReqLLM tool-calling flows.
+  """
+  def build_tools_and_registry(opts) when is_list(opts) do
     opts
-    |> exposed_tools()
-    |> Enum.map(&AshAi.Tools.to_function(&1, strict: opts.strict))
+    |> Options.validate!()
+    |> build_tools_and_registry()
   end
 
-  def iex_chat(lang_chain, opts \\ []) do
+  def build_tools_and_registry(opts), do: AshAi.Tools.build_tools_and_registry(opts)
+
+  @doc """
+  Interactive IEx chat loop powered by ReqLLM.
+  """
+  def iex_chat(opts \\ []) do
     opts = Options.validate!(opts)
 
-    messages =
+    base_messages =
       case opts.system_prompt do
         :none ->
           []
 
         nil ->
           [
-            LangChain.Message.new_system!("""
+            Context.system("""
             You are a helpful assistant.
             Your purpose is to operate the application on behalf of the user.
             """)
           ]
 
         system_prompt ->
-          [LangChain.Message.new_system!(system_prompt.(opts))]
+          [Context.system(system_prompt.(opts))]
       end
 
-    handler = %{
-      on_llm_new_delta: fn _chain, deltas ->
-        # we received a piece of data
-        for delta <- deltas do
-          IO.write(LangChain.MessageDelta.content_to_string(delta))
-        end
-      end,
-      on_message_processed: fn _chain, _data ->
-        # the message was assembled and is processed
-        IO.write("\n--\n")
-      end
-    }
-
-    lang_chain
-    |> LLMChain.add_messages(messages)
-    |> setup_ash_ai(opts)
-    |> LLMChain.add_callback(handler)
-    |> run_loop(true)
+    run_iex_loop(base_messages, opts)
   end
 
-  @doc """
-  Adds the requisite context and tool calls to allow an agent to interact with your app.
-  """
-  def setup_ash_ai(lang_chain, opts \\ [])
-
-  def setup_ash_ai(lang_chain, opts) when is_list(opts) do
-    opts = Options.validate!(opts)
-    setup_ash_ai(lang_chain, opts)
-  end
-
-  def setup_ash_ai(lang_chain, opts) do
-    tools = functions(opts)
-
-    lang_chain
-    |> LLMChain.add_tools(tools)
-    |> LLMChain.update_custom_context(%{
-      actor: opts.actor,
-      tenant: opts.tenant,
-      context: opts.context,
-      tool_callbacks: %{
-        on_tool_start: opts.on_tool_start,
-        on_tool_end: opts.on_tool_end
-      }
-    })
-  end
-
-  defp run_loop(chain, first? \\ false) do
-    chain
-    |> LLMChain.run(mode: :while_needs_response)
-    |> case do
-      {:ok,
-       %LangChain.Chains.LLMChain{
-         last_message: %{content: content}
-       } = new_chain} ->
-        if !first? && !Map.get(new_chain.llm, :stream) do
-          IO.puts(content)
+  defp run_iex_loop(messages, opts) do
+    case AshAi.ToolLoop.run(messages, opts) do
+      {:ok, %AshAi.ToolLoop.Result{messages: updated_messages, final_text: final_text}} ->
+        if final_text not in [nil, ""] do
+          IO.puts(final_text)
         end
 
         user_message = get_user_message()
+        run_iex_loop(updated_messages ++ [Context.user(user_message)], opts)
 
-        new_chain
-        |> LLMChain.add_messages([LangChain.Message.new_user!(user_message)])
-        |> run_loop()
-
-      {:error, _new_chain, error} ->
-        raise "Something went wrong:\n #{Exception.format(:error, error)}"
+      {:error, error} ->
+        raise "Something went wrong:\n #{inspect(error)}"
     end
   end
 
