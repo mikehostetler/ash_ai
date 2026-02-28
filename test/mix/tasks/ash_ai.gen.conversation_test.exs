@@ -66,7 +66,7 @@ defmodule Mix.Tasks.AshAi.Gen.ChatTest do
     +|live "/support/chat/:conversation_id", SupportChatLive
     """)
     |> assert_has_patch("config/runtime.exs", """
-    + |config :langchain, openai_key: fn -> System.fetch_env!("OPENAI_API_KEY") end
+    + |config :req_llm, openai_api_key: System.fetch_env!("OPENAI_API_KEY")
     """)
     |> apply_igniter!()
   end

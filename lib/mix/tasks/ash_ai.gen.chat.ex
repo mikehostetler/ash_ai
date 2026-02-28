@@ -117,8 +117,8 @@ if Code.ensure_loaded?(Igniter) do
       |> Igniter.add_notice("""
       AshAi:
 
-      The chat feature has been generated using the #{to_string(igniter.args.options[:provider])} provider via LangChain.
-      Please see LangChain's documentation if you need to configure a different model or provider settings.
+      The chat feature has been generated using the #{to_string(igniter.args.options[:provider])} provider via ReqLLM.
+      Please see ReqLLM's documentation if you need to configure a different model or provider settings.
       All tools in your application are available in the chat by default. Change tools: true to tools: [:a, :list, :of, :tools] to change that.
       """)
       |> maybe_add_live_component_notice(chat)
@@ -236,8 +236,7 @@ if Code.ensure_loaded?(Igniter) do
       use Ash.Resource.Change
       require Ash.Query
 
-      alias LangChain.Chains.LLMChain
-      alias #{provider.module}
+      alias ReqLLM.Context
 
       @impl true
       def change(changeset, _opts, context) do
@@ -252,43 +251,32 @@ if Code.ensure_loaded?(Igniter) do
             |> Ash.Query.sort(inserted_at: :asc)
             |> Ash.read!()
 
-          system_prompt =
-            LangChain.Message.new_system!(\"""
-            Provide a short name for the current conversation.
-            2-8 words, preferring more succinct names.
-            RESPOND WITH ONLY THE NEW CONVERSATION NAME.
-            \""")
+          prompt_messages =
+            [
+              Context.system(\"""
+              Provide a short name for the current conversation.
+              2-8 words, preferring more succinct names.
+              RESPOND WITH ONLY THE NEW CONVERSATION NAME.
+              \""")
+            ] ++
+              Enum.map(messages, fn message ->
+                if message.source == :agent do
+                  Context.assistant(message.text)
+                else
+                  Context.user(message.text)
+                end
+              end)
 
-          message_chain =
-            Enum.map(messages, fn message ->
-              if message.source == :agent do
-                LangChain.Message.new_assistant!(message.text)
-              else
-                LangChain.Message.new_user!(message.text)
-              end
-            end)
-
-          %{
-            llm: #{provider.alias}.new!(%{model: "#{provider.model}"}),
-            custom_context: Map.new(Ash.Context.to_opts(context)),
-            verbose?: true
-          }
-          |> LLMChain.new!()
-          |> LLMChain.add_message(system_prompt)
-          |> LLMChain.add_messages(message_chain)
-          |> LLMChain.run(mode: :while_needs_response)
+          ReqLLM.generate_text("#{provider.model}", prompt_messages)
           |> case do
-            {:ok,
-            %LangChain.Chains.LLMChain{
-              last_message: %{content: content}
-            }} ->
+            {:ok, response} ->
               Ash.Changeset.force_change_attribute(
-              changeset,
-              :title,
-              LangChain.Message.ContentPart.content_to_string(content)
-            )
+                changeset,
+                :title,
+                ReqLLM.Response.text(response)
+              )
 
-            {:error, _, error} ->
+            {:error, error} ->
               {:error, error}
           end
         end)
@@ -505,8 +493,7 @@ if Code.ensure_loaded?(Igniter) do
       use Ash.Resource.Change
       require Ash.Query
 
-      alias LangChain.Chains.LLMChain
-      alias #{provider.module}
+      alias ReqLLM.Context
 
       @impl true
       def change(changeset, _opts, context) do
@@ -522,95 +509,75 @@ if Code.ensure_loaded?(Igniter) do
             |> Ash.read!()
             |> Enum.concat([%{source: :user, text: message.text}])
 
-          system_prompt =
-            LangChain.Message.new_system!(\"""
+          prompt_messages =
+            [
+              Context.system(\"""
             You are a helpful chat bot.
             Your job is to use the tools at your disposal to assist the user.
             \""")
-
-          message_chain = message_chain(messages)
+            ] ++ message_chain(messages)
 
           new_message_id = Ash.UUIDv7.generate()
 
-          %{
-            llm: #{provider.alias}.new!(%{model: "#{provider.model}", stream: true}),
-            custom_context: Map.new(Ash.Context.to_opts(context))
-          }
-          |> LLMChain.new!()
-          |> LLMChain.add_message(system_prompt)
-          |> LLMChain.add_messages(message_chain)
-          # add the names of tools you want available in your conversation here.
-          # i.e tools: [:lookup_weather]
-          |> AshAi.setup_ash_ai(otp_app: :#{otp_app}, tools: true, actor: context.actor)
-          |> LLMChain.add_callback(%{
-            on_llm_new_delta: fn  _chain, deltas ->
-              deltas
-              |> List.wrap()
-              |> Enum.each(fn delta ->
-                content = LangChain.MessageDelta.content_to_string(delta)
-
-                if not is_nil(content) and content != "" do
+          final_state =
+            prompt_messages
+            |> AshAi.ToolLoop.stream(
+              otp_app: :#{otp_app},
+              tools: true,
+              model: "#{provider.model}",
+              actor: context.actor,
+              tenant: context.tenant,
+              context: Map.new(Ash.Context.to_opts(context))
+            )
+            |> Enum.reduce(%{text: "", tool_calls: [], tool_results: []}, fn
+              {:content, content}, acc ->
+                if content not in [nil, ""] do
                   #{inspect(message)}
-                  |> Ash.Changeset.for_create(:upsert_response, %{
-                    id: new_message_id,
-                    response_to_id: message.id,
-                    conversation_id: message.conversation_id,
-                    text: content
-                  }, actor: %AshAi{})
+                  |> Ash.Changeset.for_create(
+                    :upsert_response,
+                    %{
+                      id: new_message_id,
+                      response_to_id: message.id,
+                      conversation_id: message.conversation_id,
+                      text: content
+                    },
+                    actor: %AshAi{}
+                  )
                   |> Ash.create!()
                 end
-              end)
-            end,
-            on_message_processed: fn _chain, data ->
-            content = LangChain.Message.ContentPart.content_to_string(data.content)
 
-              if (data.tool_calls && Enum.any?(data.tool_calls)) ||
-                   (data.tool_results && Enum.any?(data.tool_results)) ||
-                    content not in [nil, ""] do
-                #{inspect(message)}
-                |> Ash.Changeset.for_create(
-                  :upsert_response,
-                  %{
-                    id: new_message_id,
-                    response_to_id: message.id,
-                    conversation_id: message.conversation_id,
-                    complete: true,
-                    tool_calls:
-                      data.tool_calls &&
-                        Enum.map(
-                          data.tool_calls,
-                          &Map.take(&1, [:status, :type, :call_id, :name, :arguments, :index])
-                        ),
-                    tool_results:
-                      data.tool_results &&
-                        Enum.map(
-                          data.tool_results,
-                          &Map.update(
-                            Map.take(&1, [
-                              :type,
-                              :tool_call_id,
-                              :name,
-                              :content,
-                              :display_text,
-                              :is_error,
-                              :options
-                            ]),
-                            :content,
-                            nil,
-                            fn content ->
-                              LangChain.Message.ContentPart.content_to_string(content)
-                            end
-                          )
-                        ),
-                    text: content || ""
-                  },
-                  actor: %AshAi{}
-                )
-                |> Ash.create!()
-              end
-            end
-          })
-          |> LLMChain.run(mode: :while_needs_response)
+                %{acc | text: acc.text <> (content || "")}
+
+              {:tool_call, tool_call}, acc ->
+                %{acc | tool_calls: acc.tool_calls ++ [tool_call]}
+
+              {:tool_result, %{id: id, result: result}}, acc ->
+                %{acc | tool_results: acc.tool_results ++ [normalize_tool_result(id, result)]}
+
+              {:done, _}, acc ->
+                acc
+
+              _, acc ->
+                acc
+            end)
+
+          if final_state.tool_calls != [] || final_state.tool_results != [] || final_state.text != "" do
+            #{inspect(message)}
+            |> Ash.Changeset.for_create(
+              :upsert_response,
+              %{
+                id: new_message_id,
+                response_to_id: message.id,
+                conversation_id: message.conversation_id,
+                complete: true,
+                tool_calls: final_state.tool_calls,
+                tool_results: final_state.tool_results,
+                text: final_state.text
+              },
+              actor: %AshAi{}
+            )
+            |> Ash.create!()
+          end
 
           changeset
         end)
@@ -619,47 +586,70 @@ if Code.ensure_loaded?(Igniter) do
       defp message_chain(messages) do
         Enum.flat_map(messages, fn
           %{source: :agent} = message ->
-            langchain_message =
-              LangChain.Message.new_assistant!(%{
-                content: message.text,
-                tool_calls:
-                  message.tool_calls &&
-                    Enum.map(
-                      message.tool_calls,
-                      &LangChain.Message.ToolCall.new!(
-                        Map.take(&1, ["status", "type", "call_id", "name", "arguments", "index"])
-                      )
-                    )
-              })
+            assistant =
+              Context.assistant(
+                message.text || "",
+                tool_calls: normalize_tool_calls(message.tool_calls || [])
+              )
 
-            if message.tool_results && !Enum.empty?(message.tool_results) do
-              [
-                langchain_message,
-                LangChain.Message.new_tool_result!(%{
-                  tool_results:
-                    Enum.map(
-                      message.tool_results,
-                      &LangChain.Message.ToolResult.new!(
-                        Map.take(&1, [
-                          "type",
-                          "tool_call_id",
-                          "name",
-                          "content",
-                          "display_text",
-                          "is_error",
-                          "options"
-                        ])
-                      )
-                    )
-                })
-              ]
-            else
-              [langchain_message]
-            end
+            tool_results =
+              message.tool_results
+              |> List.wrap()
+              |> Enum.flat_map(fn result ->
+                case normalize_tool_result_message(result) do
+                  nil -> []
+                  message -> [message]
+                end
+              end)
+
+            [assistant | tool_results]
 
           %{source: :user, text: text} ->
-            [LangChain.Message.new_user!(text)]
+            [Context.user(text || "")]
         end)
+      end
+
+      defp normalize_tool_calls(tool_calls) do
+        Enum.flat_map(List.wrap(tool_calls), fn call ->
+          normalized = %{
+            id:
+              call["id"] || call[:id] || call["call_id"] || call[:call_id] ||
+                "call_#{:erlang.unique_integer([:positive])}",
+            name: call["name"] || call[:name],
+            arguments: call["arguments"] || call[:arguments] || %{}
+          }
+
+          if is_binary(normalized.name), do: [normalized], else: []
+        end)
+      end
+
+      defp normalize_tool_result_message(result) do
+        id =
+          result["tool_call_id"] || result[:tool_call_id] || result["id"] || result[:id]
+
+        content = result["content"] || result[:content]
+
+        if is_binary(id) do
+          Context.tool_result(id, content || "")
+        else
+          nil
+        end
+      end
+
+      defp normalize_tool_result(tool_call_id, {:ok, content, _raw}) do
+        %{
+          tool_call_id: tool_call_id,
+          content: content,
+          is_error: false
+        }
+      end
+
+      defp normalize_tool_result(tool_call_id, {:error, content}) do
+        %{
+          tool_call_id: tool_call_id,
+          content: content,
+          is_error: true
+        }
       end
       """)
     end
@@ -1025,29 +1015,23 @@ if Code.ensure_loaded?(Igniter) do
       case to_string(provider) do
         "openai" ->
           %{
-            alias: "ChatOpenAI",
-            module: "LangChain.ChatModels.ChatOpenAI",
             env_var: "OPENAI_API_KEY",
-            langchain_key: :openai_key,
-            model: "gpt-4o"
+            req_llm_key: :openai_api_key,
+            model: "openai:gpt-4o"
           }
 
         "gemini" ->
           %{
-            alias: "ChatGoogleAI",
-            module: "LangChain.ChatModels.ChatGoogleAI",
             env_var: "GOOGLE_API_KEY",
-            langchain_key: :google_ai_key,
-            model: "gemini-1.5-pro"
+            req_llm_key: :google_api_key,
+            model: "google:gemini-1.5-pro"
           }
 
         _ ->
           %{
-            alias: "ChatAnthropic",
-            module: "LangChain.ChatModels.ChatAnthropic",
             env_var: "ANTHROPIC_API_KEY",
-            langchain_key: :anthropic_key,
-            model: "claude-opus-4-6"
+            req_llm_key: :anthropic_api_key,
+            model: "anthropic:claude-sonnet-4-5"
           }
       end
     end
@@ -1058,14 +1042,14 @@ if Code.ensure_loaded?(Igniter) do
 
       api_key_code =
         quote do
-          fn -> System.fetch_env!(unquote(env_var)) end
+          System.fetch_env!(unquote(env_var))
         end
 
       igniter
       |> Igniter.Project.Config.configure_new(
         "runtime.exs",
-        :langchain,
-        [provider.langchain_key],
+        :req_llm,
+        [provider.req_llm_key],
         {:code, api_key_code}
       )
       |> Igniter.Project.IgniterConfig.add_extension(Igniter.Extensions.Phoenix)
