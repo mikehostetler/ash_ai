@@ -4,6 +4,7 @@
 
 defmodule AshAi.Actions.Prompt do
   require Logger
+  alias __MODULE__.{FlowState, LegacyChainCompat}
 
   @prompt_template {"""
                     You are responsible for performing the `<%= @input.action.name %>` action.
@@ -64,6 +65,8 @@ defmodule AshAi.Actions.Prompt do
 
   - `:prompt` - A custom prompt. Supports multiple formats - see the prompt section below.
   - `:req_llm` - Override the ReqLLM module (useful for testing with mocks).
+  - `:transform_flow` - ReqLLM-native flow customization hook (`fn flow_state, context -> flow_state end`).
+  - `:modify_chain` - Legacy compatibility shim for old chain customizers.
   - `:tools` - `false`, `true`, or a list of tool names to allow tool-calling in the action.
   - `:max_iterations` - Maximum tool-loop iterations. Defaults to `:infinity` for prompt actions.
   - `:verbose?` - When true, logs tool-loop lifecycle events with `Logger.debug/1`.
@@ -72,6 +75,7 @@ defmodule AshAi.Actions.Prompt do
 
   - Tool-loop failures are returned as action errors with loop reason details.
   - Unconstrained `:map` return types use a permissive map schema (`type: object`).
+  - `:modify_chain` remains supported via a compatibility shim and does not expose a real LangChain chain.
 
   ## Prompt Formats
 
@@ -131,17 +135,18 @@ defmodule AshAi.Actions.Prompt do
     req_llm_module = Keyword.get(opts, :req_llm, ReqLLM)
     req_llm_opts = Keyword.get(opts, :req_llm_opts, [])
 
-    with {:ok, final_context} <-
-           maybe_run_tools(
-             initial_context,
-             input,
-             context,
-             model,
-             req_llm_module,
-             opts
-           ),
+    flow_state =
+      build_flow_state(initial_context, model, req_llm_module, req_llm_opts, context, opts)
+
+    with {:ok, flow_state} <- apply_flow_customizations(flow_state, context, opts),
+         {:ok, final_context} <- maybe_run_tools(flow_state, input, opts),
          {:ok, generated} <-
-           req_llm_module.generate_object(model, final_context, schema, req_llm_opts) do
+           flow_state.req_llm.generate_object(
+             flow_state.model,
+             final_context,
+             schema,
+             flow_state.req_llm_opts
+           ) do
       case generated do
         %{object: result} ->
           cast_result(result, input.action)
@@ -169,30 +174,148 @@ defmodule AshAi.Actions.Prompt do
 
   defp resolve_model_spec(model, _input, _context), do: model
 
-  defp maybe_run_tools(reqllm_context, input, context, model, req_llm_module, opts) do
-    case Keyword.get(opts, :tools, false) do
+  defp build_flow_state(reqllm_context, model, req_llm_module, req_llm_opts, context, opts) do
+    %FlowState{
+      model: model,
+      req_llm: req_llm_module,
+      req_llm_opts: req_llm_opts,
+      messages: reqllm_context.messages,
+      tool_selection: Keyword.get(opts, :tools, false),
+      max_iterations: Keyword.get(opts, :max_iterations, :infinity),
+      strict: Keyword.get(opts, :strict, true),
+      verbose?: Keyword.get(opts, :verbose?, false),
+      on_tool_start: opts[:on_tool_start],
+      on_tool_end: opts[:on_tool_end],
+      actor: Map.get(context, :actor),
+      tenant: Map.get(context, :tenant),
+      source_context: Map.get(context, :source_context) || %{}
+    }
+  end
+
+  defp apply_flow_customizations(flow_state, context, opts) do
+    case apply_transform_flow(flow_state, opts[:transform_flow], context) do
+      {:ok, flow_state} ->
+        apply_modify_chain(flow_state, opts[:modify_chain], context)
+
+      {:error, error} ->
+        {:error, error}
+    end
+  end
+
+  defp apply_transform_flow(flow_state, nil, _context), do: {:ok, flow_state}
+
+  defp apply_transform_flow(flow_state, transform_flow, context)
+       when is_function(transform_flow, 2) do
+    case run_flow_callback(:transform_flow, fn -> transform_flow.(flow_state, context) end) do
+      {:ok, %FlowState{} = transformed} ->
+        {:ok, transformed}
+
+      {:ok, {:ok, %FlowState{} = transformed}} ->
+        {:ok, transformed}
+
+      {:ok, {:error, reason}} ->
+        {:error, callback_error(:transform_flow, reason)}
+
+      {:ok, other} ->
+        {:error,
+         invalid_callback_result(:transform_flow, "AshAi.Actions.Prompt.FlowState", other)}
+
+      {:error, error} ->
+        {:error, error}
+    end
+  end
+
+  defp apply_transform_flow(_flow_state, transform_flow, _context) do
+    {:error, invalid_callback_option(:transform_flow, transform_flow)}
+  end
+
+  defp apply_modify_chain(flow_state, nil, _context), do: {:ok, flow_state}
+
+  defp apply_modify_chain(flow_state, modify_chain, context) when is_function(modify_chain, 2) do
+    compat_chain = LegacyChainCompat.from_flow_state(flow_state)
+
+    case run_flow_callback(:modify_chain, fn -> modify_chain.(compat_chain, context) end) do
+      {:ok, %LegacyChainCompat{} = compat} ->
+        {:ok, LegacyChainCompat.to_flow_state(compat)}
+
+      {:ok, {:ok, %LegacyChainCompat{} = compat}} ->
+        {:ok, LegacyChainCompat.to_flow_state(compat)}
+
+      {:ok, %FlowState{} = transformed} ->
+        {:ok, transformed}
+
+      {:ok, {:ok, %FlowState{} = transformed}} ->
+        {:ok, transformed}
+
+      {:ok, {:error, reason}} ->
+        {:error, callback_error(:modify_chain, reason)}
+
+      {:ok, other} ->
+        {:error,
+         invalid_callback_result(
+           :modify_chain,
+           "AshAi.Actions.Prompt.LegacyChainCompat or AshAi.Actions.Prompt.FlowState",
+           other
+         )}
+
+      {:error, error} ->
+        {:error, error}
+    end
+  end
+
+  defp apply_modify_chain(_flow_state, modify_chain, _context) do
+    {:error, invalid_callback_option(:modify_chain, modify_chain)}
+  end
+
+  defp run_flow_callback(callback_name, fun) do
+    {:ok, fun.()}
+  rescue
+    error ->
+      {:error,
+       Ash.Error.Unknown.UnknownError.exception(
+         error:
+           "#{callback_name} callback raised: #{Exception.format(:error, error, __STACKTRACE__)}"
+       )}
+  end
+
+  defp callback_error(callback_name, reason) do
+    Ash.Error.Unknown.UnknownError.exception(
+      error: "#{callback_name} callback returned error: #{inspect(reason)}"
+    )
+  end
+
+  defp invalid_callback_result(callback_name, expected, result) do
+    Ash.Error.Unknown.UnknownError.exception(
+      error: """
+      #{callback_name} callback must return #{expected} (or {:ok, value}).
+      Got: #{inspect(result)}
+      """
+    )
+  end
+
+  defp invalid_callback_option(callback_name, value) do
+    Ash.Error.Unknown.UnknownError.exception(
+      error: "#{callback_name} must be a 2-arity function, got: #{inspect(value)}"
+    )
+  end
+
+  defp maybe_run_tools(flow_state, input, opts) do
+    case flow_state.tool_selection do
       false ->
-        {:ok, reqllm_context}
+        {:ok, ReqLLM.Context.new(flow_state.messages)}
 
       nil ->
-        {:ok, reqllm_context}
+        {:ok, ReqLLM.Context.new(flow_state.messages)}
 
       tool_selection ->
-        case prompt_loop_opts(
-               tool_selection,
-               input,
-               context,
-               model,
-               req_llm_module,
-               opts
-             ) do
+        case prompt_loop_opts(tool_selection, input, flow_state, opts) do
           {:ok, loop_opts} ->
-            case AshAi.ToolLoop.run(reqllm_context.messages, loop_opts) do
+            case AshAi.ToolLoop.run(flow_state.messages, loop_opts) do
               {:ok, %AshAi.ToolLoop.Result{messages: messages}} ->
                 {:ok, ReqLLM.Context.new(messages)}
 
               {:error, reason} ->
-                if Keyword.get(opts, :verbose?, false) do
+                if flow_state.verbose? do
                   Logger.debug(fn ->
                     "AshAi.Actions.Prompt tool loop failed: #{inspect(reason)}"
                   end)
@@ -210,25 +333,31 @@ defmodule AshAi.Actions.Prompt do
     end
   end
 
-  defp prompt_loop_opts(tool_selection, input, context, model, req_llm_module, opts) do
+  defp prompt_loop_opts(tool_selection, input, flow_state, opts) do
     domain = Ash.Resource.Info.domain(input.resource)
-    actor = Map.get(context, :actor)
-    tenant = Map.get(context, :tenant)
-    source_context = Map.get(context, :source_context) || %{}
 
     base_opts =
       [
-        model: model,
-        req_llm: req_llm_module,
-        max_iterations: Keyword.get(opts, :max_iterations, :infinity),
-        actor: actor,
-        tenant: tenant,
-        context: source_context,
-        strict: Keyword.get(opts, :strict, true),
+        model: flow_state.model,
+        req_llm: flow_state.req_llm,
+        max_iterations: flow_state.max_iterations,
+        actor: flow_state.actor,
+        tenant: flow_state.tenant,
+        context: flow_state.source_context,
+        strict: flow_state.strict,
         tools: tool_selection
       ]
-      |> maybe_put_option(:on_tool_start, on_tool_start(opts))
-      |> maybe_put_option(:on_tool_end, on_tool_end(opts))
+      |> maybe_put_option(
+        :on_tool_start,
+        compose_callbacks(
+          verbose_tool_start_callback(flow_state.verbose?),
+          flow_state.on_tool_start
+        )
+      )
+      |> maybe_put_option(
+        :on_tool_end,
+        compose_callbacks(verbose_tool_end_callback(flow_state.verbose?), flow_state.on_tool_end)
+      )
 
     cond do
       Keyword.has_key?(opts, :actions) ->
@@ -316,20 +445,6 @@ defmodule AshAi.Actions.Prompt do
   end
 
   defp unconstrained_map_return?(_), do: true
-
-  defp on_tool_start(opts) do
-    compose_callbacks(
-      verbose_tool_start_callback(Keyword.get(opts, :verbose?, false)),
-      opts[:on_tool_start]
-    )
-  end
-
-  defp on_tool_end(opts) do
-    compose_callbacks(
-      verbose_tool_end_callback(Keyword.get(opts, :verbose?, false)),
-      opts[:on_tool_end]
-    )
-  end
 
   defp compose_callbacks(nil, nil), do: nil
   defp compose_callbacks(callback, nil) when is_function(callback, 1), do: callback

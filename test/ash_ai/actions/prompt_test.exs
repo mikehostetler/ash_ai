@@ -36,6 +36,15 @@ defmodule AshAi.Actions.PromptTest do
     end
   end
 
+  defmodule FakeReqLLMWithOptsCapture do
+    @moduledoc "Fake ReqLLM that captures model/context/opts"
+
+    def generate_object(model, context, _schema, opts \\ []) do
+      send(self(), {:generate_object_with_opts_called, model, context, opts})
+      {:ok, %{object: %{"result" => "test_result"}}}
+    end
+  end
+
   defmodule FakeReqLLMWithSentiment do
     @moduledoc "Fake ReqLLM that returns sentiment data"
 
@@ -177,6 +186,57 @@ defmodule AshAi.Actions.PromptTest do
         run prompt("openai:gpt-4o",
               prompt: "Process this text: <%= @input.arguments.text %>",
               req_llm: FakeReqLLM
+            )
+      end
+
+      action :analyze_with_transform_flow, :string do
+        description("Test ReqLLM-native flow customization")
+        argument(:text, :string, allow_nil?: false)
+
+        run prompt("openai:gpt-4o",
+              prompt: "Process this text: <%= @input.arguments.text %>",
+              req_llm: FakeReqLLMWithOptsCapture,
+              transform_flow: fn flow_state, _context ->
+                %{
+                  flow_state
+                  | model: "openai:gpt-4o-mini",
+                    req_llm_opts:
+                      Keyword.put(flow_state.req_llm_opts, :trace_id, "from_transform_flow"),
+                    messages:
+                      flow_state.messages ++ [ReqLLM.Context.user("transform_flow_marker")]
+                }
+              end
+            )
+      end
+
+      action :analyze_with_modify_chain_compat, :string do
+        description("Test legacy modify_chain compatibility shim")
+        argument(:text, :string, allow_nil?: false)
+
+        run prompt("openai:gpt-4o",
+              prompt: "Process this text: <%= @input.arguments.text %>",
+              req_llm: FakeReqLLMWithOptsCapture,
+              modify_chain: fn chain_like, _context ->
+                chain_like
+                |> AshAi.Actions.Prompt.LegacyChainCompat.put_model("openai:gpt-4o-mini")
+                |> AshAi.Actions.Prompt.LegacyChainCompat.put_req_llm_opts(
+                  trace_id: "from_modify_chain"
+                )
+                |> AshAi.Actions.Prompt.LegacyChainCompat.append_message(
+                  ReqLLM.Context.user("modify_chain_marker")
+                )
+              end
+            )
+      end
+
+      action :analyze_with_invalid_modify_chain_return, :string do
+        description("Test invalid modify_chain callback return handling")
+        argument(:text, :string, allow_nil?: false)
+
+        run prompt("openai:gpt-4o",
+              prompt: "Process this text: <%= @input.arguments.text %>",
+              req_llm: FakeReqLLM,
+              modify_chain: fn _chain_like, _context -> :invalid_return end
             )
       end
 
@@ -348,6 +408,44 @@ defmodule AshAi.Actions.PromptTest do
       system_message = Enum.find(context.messages, &(&1.role == :system))
       assert content_contains?(system_message.content, "hello world")
     end
+
+    test "transform_flow customizes model, req_llm opts, and messages" do
+      result =
+        TestResource
+        |> Ash.ActionInput.for_action(:analyze_with_transform_flow, %{text: "hello world"})
+        |> Ash.run_action!()
+
+      assert result == "test_result"
+
+      assert_receive {:generate_object_with_opts_called, "openai:gpt-4o-mini", context, opts}
+      assert Keyword.get(opts, :trace_id) == "from_transform_flow"
+
+      marker_message =
+        Enum.find(context.messages, fn message ->
+          message.role == :user && content_contains?(message.content, "transform_flow_marker")
+        end)
+
+      assert marker_message
+    end
+
+    test "modify_chain compatibility shim customizes model, req_llm opts, and messages" do
+      result =
+        TestResource
+        |> Ash.ActionInput.for_action(:analyze_with_modify_chain_compat, %{text: "hello world"})
+        |> Ash.run_action!()
+
+      assert result == "test_result"
+
+      assert_receive {:generate_object_with_opts_called, "openai:gpt-4o-mini", context, opts}
+      assert Keyword.get(opts, :trace_id) == "from_modify_chain"
+
+      marker_message =
+        Enum.find(context.messages, fn message ->
+          message.role == :user && content_contains?(message.content, "modify_chain_marker")
+        end)
+
+      assert marker_message
+    end
   end
 
   describe "prompt with function format" do
@@ -461,6 +559,17 @@ defmodule AshAi.Actions.PromptTest do
                )
 
       assert inspect(error) =~ "Prompt action tool use requires either"
+    end
+
+    test "invalid modify_chain callback return is surfaced as action error" do
+      assert {:error, %Ash.Error.Unknown{} = error} =
+               TestResource
+               |> Ash.ActionInput.for_action(:analyze_with_invalid_modify_chain_return, %{
+                 text: "test"
+               })
+               |> Ash.run_action()
+
+      assert inspect(error) =~ "modify_chain callback must return"
     end
   end
 
