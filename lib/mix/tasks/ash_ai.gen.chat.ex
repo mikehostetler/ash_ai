@@ -54,7 +54,7 @@ defmodule Mix.Tasks.AshAi.Gen.Chat.Docs do
     * `--user` - The user resource.
     * `--domain` - The domain module to place the resources in. E.g., `--domain MyApp.SupportChat` generates `MyApp.SupportChat.Conversation` and `MyApp.SupportChat.Message`. Defaults to `YourApp.Chat`.
     * `--route` - A URL prefix for the chat routes. E.g., `--route support` mounts routes at `/support/chat`.
-    * `--provider` - The LLM provider to use: `anthropic` (default), `openai`, or `gemini`.
+    * `--provider` - The LLM provider to use: `openai` (default), `anthropic`, or `gemini`.
     * `--extend` - Extensions to apply to the generated resources, passed through to `mix ash.gen.resource`.
     * `--live` - Generate a full-page Phoenix LiveView for the chat UI.
     * `--live-component` - Generate a reusable Phoenix LiveComponent for embedding the chat UI in existing pages.
@@ -85,7 +85,7 @@ if Code.ensure_loaded?(Igniter) do
           live_component: :boolean,
           yes: :boolean
         ],
-        defaults: [live: false, live_component: false, yes: false, provider: "anthropic"]
+        defaults: [live: false, live_component: false, yes: false, provider: "openai"]
       }
     end
 
@@ -1042,6 +1042,13 @@ if Code.ensure_loaded?(Igniter) do
             model: "openai:gpt-4o"
           }
 
+        "anthropic" ->
+          %{
+            env_var: "ANTHROPIC_API_KEY",
+            req_llm_key: :anthropic_api_key,
+            model: "anthropic:claude-sonnet-4-5"
+          }
+
         "gemini" ->
           %{
             env_var: "GOOGLE_API_KEY",
@@ -1051,9 +1058,9 @@ if Code.ensure_loaded?(Igniter) do
 
         _ ->
           %{
-            env_var: "ANTHROPIC_API_KEY",
-            req_llm_key: :anthropic_api_key,
-            model: "anthropic:claude-sonnet-4-5"
+            env_var: "OPENAI_API_KEY",
+            req_llm_key: :openai_api_key,
+            model: "openai:gpt-4o"
           }
       end
     end
@@ -1298,6 +1305,9 @@ if Code.ensure_loaded?(Igniter) do
                         <%= for tool_call <- tool_calls(message) do %>
                           <span class="badge badge-outline badge-info">
                             tool: {tool_call.name}
+                            <span :if={tool_call.arguments != %{}}>
+                              ({tool_call_arguments_preview(tool_call.arguments)})
+                            </span>
                           </span>
                         <% end %>
                       </div>
@@ -1563,13 +1573,33 @@ if Code.ensure_loaded?(Igniter) do
                   id:
                     message_field(call, :id) || message_field(call, :call_id) ||
                       "call_unknown",
-                  name: name
+                  name: name,
+                  arguments: normalize_tool_call_arguments(message_field(call, :arguments))
                 }
               ]
             else
               []
             end
           end)
+        end
+
+        defp normalize_tool_call_arguments(nil), do: %{}
+
+        defp normalize_tool_call_arguments(arguments) when is_binary(arguments) do
+          case Jason.decode(arguments) do
+            {:ok, decoded} when is_map(decoded) -> decoded
+            _ -> %{"raw" => arguments}
+          end
+        end
+
+        defp normalize_tool_call_arguments(arguments) when is_map(arguments), do: arguments
+        defp normalize_tool_call_arguments(arguments), do: %{"raw" => inspect(arguments)}
+
+        defp tool_call_arguments_preview(arguments) do
+          arguments
+          |> normalize_tool_call_arguments()
+          |> Jason.encode!()
+          |> String.slice(0, 80)
         end
 
         defp tool_results(message) do
@@ -1857,6 +1887,9 @@ if Code.ensure_loaded?(Igniter) do
                       <%= for tool_call <- tool_calls(message) do %>
                         <span class="badge badge-outline badge-info">
                           tool: {tool_call.name}
+                          <span :if={tool_call.arguments != %{}}>
+                            ({tool_call_arguments_preview(tool_call.arguments)})
+                          </span>
                         </span>
                       <% end %>
                     </div>
@@ -2072,13 +2105,33 @@ if Code.ensure_loaded?(Igniter) do
                 id:
                   message_field(call, :id) || message_field(call, :call_id) ||
                     "call_unknown",
-                name: name
+                name: name,
+                arguments: normalize_tool_call_arguments(message_field(call, :arguments))
               }
             ]
           else
             []
           end
         end)
+      end
+
+      defp normalize_tool_call_arguments(nil), do: %{}
+
+      defp normalize_tool_call_arguments(arguments) when is_binary(arguments) do
+        case Jason.decode(arguments) do
+          {:ok, decoded} when is_map(decoded) -> decoded
+          _ -> %{"raw" => arguments}
+        end
+      end
+
+      defp normalize_tool_call_arguments(arguments) when is_map(arguments), do: arguments
+      defp normalize_tool_call_arguments(arguments), do: %{"raw" => inspect(arguments)}
+
+      defp tool_call_arguments_preview(arguments) do
+        arguments
+        |> normalize_tool_call_arguments()
+        |> Jason.encode!()
+        |> String.slice(0, 80)
       end
 
       defp tool_results(message) do

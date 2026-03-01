@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2024 ash_ai contributors <https://github.com/ash-project/ash_ai/graphs.contributors>
+# SPDX-FileCopyrightText: 2024 ash_ai contributors <https://github.com/ash-project/ash_ai/graphs/contributors>
 #
 # SPDX-License-Identifier: MIT
 
@@ -112,7 +112,7 @@ defmodule AshAi.ToolLoop do
       tool_calls_made: tool_calls_made
     } = state
 
-    if iteration > max_iterations do
+    if max_iterations_reached?(iteration, max_iterations) do
       result = %Result{
         messages: messages,
         final_text: "",
@@ -122,60 +122,72 @@ defmodule AshAi.ToolLoop do
 
       {:done, [{:error, :max_iterations_reached}], result}
     else
-      {:ok, stream_response} = req_llm.stream_text(model, messages, tools: tools)
-      chunks = Enum.to_list(stream_response.stream)
-      content_events = content_events(chunks)
+      case req_llm.stream_text(model, messages, tools: tools) do
+        {:ok, stream_response} ->
+          chunks = Enum.to_list(stream_response.stream)
+          content_events = content_events(chunks)
 
-      classification =
-        stream_response
-        |> Map.put(:stream, chunks)
-        |> ReqLLM.StreamResponse.classify()
+          classification =
+            stream_response
+            |> Map.put(:stream, chunks)
+            |> ReqLLM.StreamResponse.classify()
 
-      if classification.type == :tool_calls do
-        tool_calls =
-          Enum.map(classification.tool_calls, fn tool_call ->
-            %{
-              id: Map.get(tool_call, :id) || generate_tool_id(),
-              name: Map.fetch!(tool_call, :name),
-              arguments: Map.get(tool_call, :arguments, %{})
+          if classification.type == :tool_calls do
+            tool_calls =
+              Enum.map(classification.tool_calls, fn tool_call ->
+                %{
+                  id: Map.get(tool_call, :id) || generate_tool_id(),
+                  name: Map.fetch!(tool_call, :name),
+                  arguments: Map.get(tool_call, :arguments, %{})
+                }
+              end)
+
+            assistant_with_tools =
+              Context.assistant(classification.text || "", tool_calls: tool_calls)
+
+            messages = messages ++ [assistant_with_tools]
+
+            {messages, tool_events} = run_tools_streaming(tool_calls, messages, registry, context)
+
+            new_state = %{
+              state
+              | messages: messages,
+                iteration: iteration + 1,
+                tool_calls_made: tool_calls_made ++ tool_calls
             }
-          end)
 
-        assistant_with_tools =
-          Context.assistant(classification.text || "", tool_calls: tool_calls)
-
-        messages = messages ++ [assistant_with_tools]
-
-        {messages, tool_events} = run_tools_streaming(tool_calls, messages, registry, context)
-
-        new_state = %{
-          state
-          | messages: messages,
-            iteration: iteration + 1,
-            tool_calls_made: tool_calls_made ++ tool_calls
-        }
-
-        {:continue,
-         content_events ++
-           Enum.map(tool_calls, &{:tool_call, &1}) ++
-           tool_events ++
-           [{:iteration, %IterationEvent{iteration: iteration + 1}}], new_state}
-      else
-        messages =
-          if classification.text not in [nil, ""] do
-            messages ++ [Context.assistant(classification.text)]
+            {:continue,
+             content_events ++
+               Enum.map(tool_calls, &{:tool_call, &1}) ++
+               tool_events ++
+               [{:iteration, %IterationEvent{iteration: iteration + 1}}], new_state}
           else
-            messages
+            messages =
+              if classification.text in [nil, ""] do
+                messages
+              else
+                messages ++ [Context.assistant(classification.text)]
+              end
+
+            result = %Result{
+              messages: messages,
+              final_text: classification.text || "",
+              iterations: iteration,
+              tool_calls_made: tool_calls_made
+            }
+
+            {:done, content_events, result}
           end
 
-        result = %Result{
-          messages: messages,
-          final_text: classification.text || "",
-          iterations: iteration,
-          tool_calls_made: tool_calls_made
-        }
+        {:error, reason} ->
+          result = %Result{
+            messages: messages,
+            final_text: "",
+            iterations: iteration - 1,
+            tool_calls_made: tool_calls_made
+          }
 
-        {:done, content_events, result}
+          {:done, [{:error, reason}], result}
       end
     end
   end
@@ -227,54 +239,59 @@ defmodule AshAi.ToolLoop do
          max_iterations,
          tool_calls_made
        ) do
-    if iteration > max_iterations do
+    if max_iterations_reached?(iteration, max_iterations) do
       {:error, :max_iterations_reached}
     else
-      {:ok, stream_response} = req_llm.stream_text(model, messages, tools: tools)
-      classification = ReqLLM.StreamResponse.classify(stream_response)
+      case req_llm.stream_text(model, messages, tools: tools) do
+        {:ok, stream_response} ->
+          classification = ReqLLM.StreamResponse.classify(stream_response)
 
-      if classification.type == :tool_calls do
-        tool_calls =
-          Enum.map(classification.tool_calls, fn tool_call ->
-            %{
-              id: Map.get(tool_call, :id) || generate_tool_id(),
-              name: Map.fetch!(tool_call, :name),
-              arguments: Map.get(tool_call, :arguments, %{})
-            }
-          end)
+          if classification.type == :tool_calls do
+            tool_calls =
+              Enum.map(classification.tool_calls, fn tool_call ->
+                %{
+                  id: Map.get(tool_call, :id) || generate_tool_id(),
+                  name: Map.fetch!(tool_call, :name),
+                  arguments: Map.get(tool_call, :arguments, %{})
+                }
+              end)
 
-        assistant_with_tools =
-          Context.assistant(classification.text || "", tool_calls: tool_calls)
+            assistant_with_tools =
+              Context.assistant(classification.text || "", tool_calls: tool_calls)
 
-        messages = messages ++ [assistant_with_tools]
-        messages = run_tools(tool_calls, messages, registry, context)
+            messages = messages ++ [assistant_with_tools]
+            messages = run_tools(tool_calls, messages, registry, context)
 
-        run_loop(
-          req_llm,
-          model,
-          messages,
-          tools,
-          registry,
-          context,
-          iteration + 1,
-          max_iterations,
-          tool_calls_made ++ tool_calls
-        )
-      else
-        messages =
-          if classification.text not in [nil, ""] do
-            messages ++ [Context.assistant(classification.text)]
+            run_loop(
+              req_llm,
+              model,
+              messages,
+              tools,
+              registry,
+              context,
+              iteration + 1,
+              max_iterations,
+              tool_calls_made ++ tool_calls
+            )
           else
-            messages
+            messages =
+              if classification.text in [nil, ""] do
+                messages
+              else
+                messages ++ [Context.assistant(classification.text)]
+              end
+
+            {:ok,
+             %Result{
+               messages: messages,
+               final_text: classification.text || "",
+               iterations: iteration,
+               tool_calls_made: tool_calls_made
+             }}
           end
 
-        {:ok,
-         %Result{
-           messages: messages,
-           final_text: classification.text || "",
-           iterations: iteration,
-           tool_calls_made: tool_calls_made
-         }}
+        {:error, reason} ->
+          {:error, reason}
       end
     end
   end
@@ -293,19 +310,18 @@ defmodule AshAi.ToolLoop do
       content = Jason.encode!(%{error: "Unknown tool: #{tool_call.name}"})
       {{:error, content}, content}
     else
-      args =
-        case tool_call.arguments do
-          s when is_binary(s) -> Jason.decode!(s)
-          m when is_map(m) -> m
-          _ -> %{}
-        end
-
       result =
-        try do
-          fun.(args, ctx)
-        rescue
-          e ->
-            {:error, Jason.encode!(%{error: Exception.message(e)})}
+        case decode_tool_call_arguments(tool_call.arguments) do
+          {:ok, args} ->
+            try do
+              fun.(args, ctx)
+            rescue
+              e ->
+                {:error, Jason.encode!(%{error: Exception.message(e)})}
+            end
+
+          {:error, reason} ->
+            {:error, Jason.encode!(%{error: reason})}
         end
 
       content =
@@ -318,7 +334,26 @@ defmodule AshAi.ToolLoop do
     end
   end
 
+  defp decode_tool_call_arguments(s) when is_binary(s) do
+    case Jason.decode(s) do
+      {:ok, m} when is_map(m) ->
+        {:ok, m}
+
+      {:ok, other} ->
+        {:error, "Invalid tool arguments JSON type: #{inspect(other)}"}
+
+      {:error, error} ->
+        {:error, "Invalid tool arguments JSON: #{Exception.message(error)}"}
+    end
+  end
+
+  defp decode_tool_call_arguments(m) when is_map(m), do: {:ok, m}
+  defp decode_tool_call_arguments(_), do: {:ok, %{}}
+
   defp generate_tool_id do
     "call_#{:erlang.unique_integer([:positive])}"
   end
+
+  defp max_iterations_reached?(_iteration, :infinity), do: false
+  defp max_iterations_reached?(iteration, max_iterations), do: iteration > max_iterations
 end

@@ -1,4 +1,4 @@
-# SPDX-FileCopyrightText: 2024 ash_ai contributors <https://github.com/ash-project/ash_ai/graphs.contributors>
+# SPDX-FileCopyrightText: 2024 ash_ai contributors <https://github.com/ash-project/ash_ai/graphs/contributors>
 #
 # SPDX-License-Identifier: MIT
 
@@ -77,6 +77,37 @@ defmodule AshAi.Actions.PromptTest do
 
     def generate_object(_model, _context, _schema, _opts \\ []) do
       {:error, "API error: rate limited"}
+    end
+  end
+
+  defmodule FakeReqLLMWithMapSchema do
+    @moduledoc "Fake ReqLLM that captures schema used for :map outputs"
+
+    def generate_object(_model, _context, schema, _opts \\ []) do
+      send(self(), {:map_schema, schema})
+      {:ok, %{object: %{"result" => %{"foo" => "bar", "nested" => %{"n" => 1}}}}}
+    end
+  end
+
+  defmodule FakeReqLLMToolLoopInfiniteToolCalls do
+    @moduledoc "Fake ReqLLM that always requests a tool call while streaming"
+
+    def stream_text(_model, _messages, _opts \\ []) do
+      {:ok,
+       %ReqLLM.StreamResponse{
+         stream: [
+           ReqLLM.StreamChunk.tool_call("read_test_resources", %{}),
+           ReqLLM.StreamChunk.meta(%{finish_reason: :tool_calls})
+         ],
+         metadata_handle: :ignored,
+         cancel: fn -> :ok end,
+         model: "openai:gpt-4o",
+         context: ReqLLM.Context.new([])
+       }}
+    end
+
+    def generate_object(_model, _context, _schema, _opts \\ []) do
+      {:ok, %{object: %{"result" => "should_not_reach_generate_object"}}}
     end
   end
 
@@ -216,6 +247,28 @@ defmodule AshAi.Actions.PromptTest do
               req_llm: FakeReqLLMError
             )
       end
+
+      action :analyze_with_map_return, :map do
+        description("Test unconstrained map return handling")
+        argument(:text, :string, allow_nil?: false)
+
+        run prompt("openai:gpt-4o",
+              prompt: "Return a map for: <%= @input.arguments.text %>",
+              req_llm: FakeReqLLMWithMapSchema
+            )
+      end
+
+      action :tool_loop_failure_returns_error, :string do
+        description("Test tool loop failure propagation")
+        argument(:text, :string, allow_nil?: false)
+
+        run prompt("openai:gpt-4o",
+              prompt: "Use tools forever",
+              tools: true,
+              max_iterations: 1,
+              req_llm: FakeReqLLMToolLoopInfiniteToolCalls
+            )
+      end
     end
   end
 
@@ -224,6 +277,28 @@ defmodule AshAi.Actions.PromptTest do
 
     resources do
       resource(TestResource)
+    end
+
+    tools do
+      tool(:read_test_resources, TestResource, :read)
+    end
+  end
+
+  defmodule NoDomainResource do
+    use Ash.Resource, domain: nil, data_layer: Ash.DataLayer.Ets
+
+    ets do
+      private?(true)
+    end
+
+    actions do
+      default_accept([:*])
+
+      action :tool_requires_resolution_context, :string do
+        argument(:text, :string, allow_nil?: false)
+
+        run fn _input, _ctx -> {:ok, "noop"} end
+      end
     end
   end
 
@@ -350,6 +425,56 @@ defmodule AshAi.Actions.PromptTest do
 
       assert length(error.errors) == 1
       assert hd(error.errors).error =~ "rate limited"
+    end
+
+    test "tool loop failures return action errors with reason details" do
+      assert {:error, %Ash.Error.Unknown{} = error} =
+               TestResource
+               |> Ash.ActionInput.for_action(:tool_loop_failure_returns_error, %{text: "loop"})
+               |> Ash.run_action()
+
+      assert Enum.any?(error.errors, fn detail ->
+               inspect(detail) =~ "Tool loop failed in prompt action" &&
+                 inspect(detail) =~ "max_iterations_reached"
+             end)
+    end
+
+    test "tool setup precondition failure returns action errors instead of raising" do
+      action = Ash.Resource.Info.action(NoDomainResource, :tool_requires_resolution_context)
+
+      input = %Ash.ActionInput{
+        resource: NoDomainResource,
+        action: action,
+        arguments: %{text: "hi"}
+      }
+
+      assert {:error, error} =
+               AshAi.Actions.Prompt.run(
+                 input,
+                 [
+                   model: "openai:gpt-4o",
+                   prompt: "Say hi",
+                   tools: true,
+                   req_llm: FakeReqLLM
+                 ],
+                 %{}
+               )
+
+      assert inspect(error) =~ "Prompt action tool use requires either"
+    end
+  end
+
+  describe "map returns" do
+    test "uses permissive schema for unconstrained map return values" do
+      result =
+        TestResource
+        |> Ash.ActionInput.for_action(:analyze_with_map_return, %{text: "map please"})
+        |> Ash.run_action!()
+
+      assert result == %{"foo" => "bar", "nested" => %{"n" => 1}}
+
+      assert_receive {:map_schema, schema}
+      assert schema["properties"]["result"] in [%{"type" => "object"}, %{type: :object}]
     end
   end
 end

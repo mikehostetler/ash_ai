@@ -71,6 +71,17 @@ defmodule Mix.Tasks.AshAi.Gen.ChatTest do
     |> apply_igniter!()
   end
 
+  test "default provider is openai when --provider is not supplied", %{argv: argv} do
+    argv = argv ++ ["--live"]
+
+    phx_test_project()
+    |> Igniter.compose_task("ash_ai.gen.chat", argv)
+    |> assert_has_patch("config/runtime.exs", """
+    + |config :req_llm, openai_api_key: System.get_env("OPENAI_API_KEY")
+    """)
+    |> apply_igniter!()
+  end
+
   test "--live with --user guards unauthenticated actor-required flows", %{argv: argv} do
     argv = argv ++ ["--live"]
 
@@ -86,5 +97,26 @@ defmodule Mix.Tasks.AshAi.Gen.ChatTest do
     ||> put_flash(:error, "You must sign in to access conversations")
     """)
     |> apply_igniter!()
+  end
+
+  test "tool call arguments are preserved and previewed in both generated UI branches", %{
+    argv: argv
+  } do
+    argv = argv ++ ["--live", "--live-component"]
+
+    phx_test_project()
+    |> Igniter.compose_task("ash_ai.gen.chat", argv)
+    |> assert_has_patch("lib/test_web/live/chat_live.ex", """
+    |arguments: normalize_tool_call_arguments(message_field(call, :arguments))
+    """)
+    |> assert_has_patch("lib/test_web/live/chat_live.ex", """
+    |tool_call_arguments_preview(tool_call.arguments)
+    """)
+    |> assert_has_patch("lib/test_web/chat_component.ex", """
+    |arguments: normalize_tool_call_arguments(message_field(call, :arguments))
+    """)
+    |> assert_has_patch("lib/test_web/chat_component.ex", """
+    |tool_call_arguments_preview(tool_call.arguments)
+    """)
   end
 end

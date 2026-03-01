@@ -1,8 +1,10 @@
-# SPDX-FileCopyrightText: 2024 ash_ai contributors <https://github.com/ash-project/ash_ai/graphs.contributors>
+# SPDX-FileCopyrightText: 2024 ash_ai contributors <https://github.com/ash-project/ash_ai/graphs/contributors>
 #
 # SPDX-License-Identifier: MIT
 
 defmodule AshAi.Actions.Prompt do
+  require Logger
+
   @prompt_template {"""
                     You are responsible for performing the `<%= @input.action.name %>` action.
 
@@ -62,6 +64,14 @@ defmodule AshAi.Actions.Prompt do
 
   - `:prompt` - A custom prompt. Supports multiple formats - see the prompt section below.
   - `:req_llm` - Override the ReqLLM module (useful for testing with mocks).
+  - `:tools` - `false`, `true`, or a list of tool names to allow tool-calling in the action.
+  - `:max_iterations` - Maximum tool-loop iterations. Defaults to `:infinity` for prompt actions.
+  - `:verbose?` - When true, logs tool-loop lifecycle events with `Logger.debug/1`.
+
+  ## Behavior Notes
+
+  - Tool-loop failures are returned as action errors with loop reason details.
+  - Unconstrained `:map` return types use a permissive map schema (`type: object`).
 
   ## Prompt Formats
 
@@ -121,23 +131,25 @@ defmodule AshAi.Actions.Prompt do
     req_llm_module = Keyword.get(opts, :req_llm, ReqLLM)
     req_llm_opts = Keyword.get(opts, :req_llm_opts, [])
 
-    final_context =
-      maybe_run_tools(
-        initial_context,
-        input,
-        context,
-        model,
-        req_llm_module,
-        opts
-      )
+    with {:ok, final_context} <-
+           maybe_run_tools(
+             initial_context,
+             input,
+             context,
+             model,
+             req_llm_module,
+             opts
+           ),
+         {:ok, generated} <-
+           req_llm_module.generate_object(model, final_context, schema, req_llm_opts) do
+      case generated do
+        %{object: result} ->
+          cast_result(result, input.action)
 
-    case req_llm_module.generate_object(model, final_context, schema, req_llm_opts) do
-      {:ok, %{object: result}} ->
-        cast_result(result, input.action)
-
-      {:ok, result} when is_map(result) ->
-        cast_result(result, input.action)
-
+        result when is_map(result) ->
+          cast_result(result, input.action)
+      end
+    else
       {:error, error} ->
         {:error, error}
     end
@@ -160,28 +172,40 @@ defmodule AshAi.Actions.Prompt do
   defp maybe_run_tools(reqllm_context, input, context, model, req_llm_module, opts) do
     case Keyword.get(opts, :tools, false) do
       false ->
-        reqllm_context
+        {:ok, reqllm_context}
 
       nil ->
-        reqllm_context
+        {:ok, reqllm_context}
 
       tool_selection ->
-        loop_opts =
-          prompt_loop_opts(
-            tool_selection,
-            input,
-            context,
-            model,
-            req_llm_module,
-            opts
-          )
+        case prompt_loop_opts(
+               tool_selection,
+               input,
+               context,
+               model,
+               req_llm_module,
+               opts
+             ) do
+          {:ok, loop_opts} ->
+            case AshAi.ToolLoop.run(reqllm_context.messages, loop_opts) do
+              {:ok, %AshAi.ToolLoop.Result{messages: messages}} ->
+                {:ok, ReqLLM.Context.new(messages)}
 
-        case AshAi.ToolLoop.run(reqllm_context.messages, loop_opts) do
-          {:ok, %AshAi.ToolLoop.Result{messages: messages}} ->
-            ReqLLM.Context.new(messages)
+              {:error, reason} ->
+                if Keyword.get(opts, :verbose?, false) do
+                  Logger.debug(fn ->
+                    "AshAi.Actions.Prompt tool loop failed: #{inspect(reason)}"
+                  end)
+                end
 
-          {:error, reason} ->
-            raise "Tool loop failed in prompt action: #{inspect(reason)}"
+                {:error,
+                 Ash.Error.Unknown.UnknownError.exception(
+                   error: "Tool loop failed in prompt action: #{inspect(reason)}"
+                 )}
+            end
+
+          {:error, error} ->
+            {:error, error}
         end
     end
   end
@@ -192,23 +216,26 @@ defmodule AshAi.Actions.Prompt do
     tenant = Map.get(context, :tenant)
     source_context = Map.get(context, :source_context) || %{}
 
-    base_opts = [
-      model: model,
-      req_llm: req_llm_module,
-      max_iterations: Keyword.get(opts, :max_iterations, 10),
-      actor: actor,
-      tenant: tenant,
-      context: source_context,
-      strict: Keyword.get(opts, :strict, true),
-      tools: tool_selection
-    ]
+    base_opts =
+      [
+        model: model,
+        req_llm: req_llm_module,
+        max_iterations: Keyword.get(opts, :max_iterations, :infinity),
+        actor: actor,
+        tenant: tenant,
+        context: source_context,
+        strict: Keyword.get(opts, :strict, true),
+        tools: tool_selection
+      ]
+      |> maybe_put_option(:on_tool_start, on_tool_start(opts))
+      |> maybe_put_option(:on_tool_end, on_tool_end(opts))
 
     cond do
       Keyword.has_key?(opts, :actions) ->
-        Keyword.put(base_opts, :actions, Keyword.fetch!(opts, :actions))
+        {:ok, Keyword.put(base_opts, :actions, Keyword.fetch!(opts, :actions))}
 
       Keyword.has_key?(opts, :otp_app) ->
-        Keyword.put(base_opts, :otp_app, Keyword.fetch!(opts, :otp_app))
+        {:ok, Keyword.put(base_opts, :otp_app, Keyword.fetch!(opts, :otp_app))}
 
       domain ->
         domain_actions =
@@ -217,26 +244,24 @@ defmodule AshAi.Actions.Prompt do
           |> Enum.group_by(& &1.resource, & &1.action)
           |> Map.to_list()
 
-        Keyword.put(base_opts, :actions, domain_actions)
+        {:ok, Keyword.put(base_opts, :actions, domain_actions)}
 
       true ->
-        raise """
-        Prompt action tool use requires either:
-        - `otp_app: :your_app`, or
-        - explicit `actions: [{Resource, [:action]}]`, or
-        - a resource with a resolvable Ash domain.
-        """
+        {:error,
+         Ash.Error.Unknown.UnknownError.exception(
+           error: """
+           Prompt action tool use requires either:
+           - `otp_app: :your_app`, or
+           - explicit `actions: [{Resource, [:action]}]`, or
+           - a resource with a resolvable Ash domain.
+           """
+         )}
     end
   end
 
   defp build_json_schema(input) do
     if input.action.returns do
-      inner_schema =
-        AshAi.OpenApi.resource_write_attribute_type(
-          %{name: :result, type: input.action.returns, constraints: input.action.constraints},
-          nil,
-          :create
-        )
+      inner_schema = return_inner_schema(input.action)
 
       result_schema =
         if input.action.allow_nil? do
@@ -261,6 +286,84 @@ defmodule AshAi.Actions.Prompt do
       }
     end
   end
+
+  defp return_inner_schema(%{returns: :map} = action) do
+    if unconstrained_map_return?(action.constraints) do
+      %{"type" => "object"}
+    else
+      AshAi.OpenApi.resource_write_attribute_type(
+        %{name: :result, type: action.returns, constraints: action.constraints},
+        nil,
+        :create
+      )
+    end
+  end
+
+  defp return_inner_schema(action) do
+    AshAi.OpenApi.resource_write_attribute_type(
+      %{name: :result, type: action.returns, constraints: action.constraints},
+      nil,
+      :create
+    )
+  end
+
+  defp unconstrained_map_return?(constraints) when is_list(constraints) do
+    Keyword.get(constraints, :fields) in [nil, []]
+  end
+
+  defp unconstrained_map_return?(constraints) when is_map(constraints) do
+    Map.get(constraints, :fields) in [nil, []]
+  end
+
+  defp unconstrained_map_return?(_), do: true
+
+  defp on_tool_start(opts) do
+    compose_callbacks(
+      verbose_tool_start_callback(Keyword.get(opts, :verbose?, false)),
+      opts[:on_tool_start]
+    )
+  end
+
+  defp on_tool_end(opts) do
+    compose_callbacks(
+      verbose_tool_end_callback(Keyword.get(opts, :verbose?, false)),
+      opts[:on_tool_end]
+    )
+  end
+
+  defp compose_callbacks(nil, nil), do: nil
+  defp compose_callbacks(callback, nil) when is_function(callback, 1), do: callback
+  defp compose_callbacks(nil, callback) when is_function(callback, 1), do: callback
+
+  defp compose_callbacks(first, second) when is_function(first, 1) and is_function(second, 1) do
+    fn event ->
+      first.(event)
+      second.(event)
+    end
+  end
+
+  defp verbose_tool_start_callback(false), do: nil
+
+  defp verbose_tool_start_callback(true) do
+    fn event ->
+      Logger.debug(fn ->
+        "AshAi.Actions.Prompt tool start tool=#{event.tool_name} action=#{event.action} arguments=#{inspect(event.arguments)}"
+      end)
+    end
+  end
+
+  defp verbose_tool_end_callback(false), do: nil
+
+  defp verbose_tool_end_callback(true) do
+    fn event ->
+      Logger.debug(fn ->
+        "AshAi.Actions.Prompt tool end tool=#{event.tool_name} result=#{inspect(event.result)}"
+      end)
+    end
+  end
+
+  defp maybe_put_option(opts, _key, nil), do: opts
+  defp maybe_put_option(opts, key, value), do: Keyword.put(opts, key, value)
 
   defp cast_result(result, action) do
     value = unwrap_result(result)
