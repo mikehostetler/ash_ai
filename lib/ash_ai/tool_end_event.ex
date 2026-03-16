@@ -4,7 +4,7 @@
 
 defmodule AshAi.ToolEndEvent do
   @moduledoc """
-  Event data passed to the `on_tool_end` callback passed to `AshAi.setup_ash_ai/2`.
+  Event data passed to the `on_tool_end` callback used by `AshAi.ToolLoop`.
 
   Contains the tool name and execution result.
   """

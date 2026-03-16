@@ -1,5 +1,5 @@
 <!--
-SPDX-FileCopyrightText: 2024 ash_ai contributors <https://github.com/ash-project/ash_ai/graphs.contributors>
+SPDX-FileCopyrightText: 2024 ash_ai contributors <https://github.com/ash-project/ash_ai/graphs/contributors>
 
 SPDX-License-Identifier: MIT
 -->
@@ -10,6 +10,43 @@ All notable changes to this project will be documented in this file.
 See [Conventional Commits](Https://conventionalcommits.org) for commit guidelines.
 
 <!-- changelog -->
+
+## [Unreleased]
+
+### Breaking Changes
+
+* Hard cutover from LangChain to ReqLLM for all LLM access paths.
+* Removed `AshAi.setup_ash_ai/2`, `AshAi.functions/1`, and LangChain-based `AshAi.iex_chat/2`.
+* Added ReqLLM-first orchestration APIs:
+  * `AshAi.list_tools/1`
+  * `AshAi.build_tools_and_registry/1`
+  * `AshAi.ToolLoop.run/2`
+  * `AshAi.ToolLoop.stream/2`
+  * `AshAi.iex_chat/1`
+* `prompt/2` now uses ReqLLM model specs (`"provider:model"`, ReqLLM tuples, or functions returning them).
+* Prompt actions keep `tools:` support via `AshAi.ToolLoop`.
+* `mix ash_ai.gen.chat` now generates ReqLLM-based chat code and runtime config (`config :req_llm, ...`).
+* Runtime does not include Jido integration.
+
+### Migration Notes
+
+* Full guide: [LangChain to ReqLLM Migration Guide](/documentation/topics/langchain-to-reqllm-migration.md)
+* Replace LangChain model structs with ReqLLM model specs, e.g.:
+  * `LangChain.ChatModels.ChatOpenAI.new!(%{model: "gpt-4o"})`
+  * becomes `"openai:gpt-4o"`
+* Replace `AshAi.setup_ash_ai/2` usage with `AshAi.ToolLoop` or `AshAi.build_tools_and_registry/1`.
+* Update runtime configuration keys:
+  * `config :langchain, ...` -> `config :req_llm, ...`
+
+### Improvements
+
+* prompt actions: default tool-loop `max_iterations` to `:infinity` (unless explicitly set)
+* prompt actions: return tool-loop failures as action errors with reason details
+* prompt actions: support `verbose?` tool-loop lifecycle logging
+* prompt actions: use permissive schema for unconstrained `:map` returns
+* `ash_ai.gen.chat`: preserve and preview tool call arguments in both LiveView and LiveComponent templates
+* `ash_ai.gen.chat`: collapse generated tool UI helpers into `AshAi.ChatUI.Tools.extract/1` with one-time warning flash on malformed tool data
+* docs: add legacy compatibility notes for adapter mapping and embedding return tuple behavior
 
 ## [v0.5.0](https://github.com/ash-project/ash_ai/compare/v0.4.0...v0.5.0) (2026-01-26)
 

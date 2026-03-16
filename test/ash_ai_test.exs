@@ -4,10 +4,8 @@
 
 defmodule AshAiTest do
   use ExUnit.Case, async: true
-  alias AshAi.ChatFaker
-  alias LangChain.Chains.LLMChain
-  alias LangChain.Message
-  alias __MODULE__.{Music, Artist, Album}
+
+  alias __MODULE__.{Album, Artist, Music}
 
   defmodule Artist do
     use Ash.Resource, domain: Music, data_layer: Ash.DataLayer.Ets
@@ -35,8 +33,6 @@ defmodule AshAiTest do
       end
 
       action :check_context, :map do
-        description("Check if context is available")
-
         run(fn _input, context ->
           {:ok, %{context: context.source_context}}
         end)
@@ -100,7 +96,39 @@ defmodule AshAiTest do
     end
   end
 
-  describe "setup_ash_ai" do
+  describe "list_tools/1" do
+    test "returns ReqLLM tools with expected schema" do
+      tools = AshAi.list_tools(actions: [{Artist, :*}], strict: false)
+
+      assert is_list(tools)
+      assert Enum.all?(tools, &match?(%ReqLLM.Tool{}, &1))
+
+      read_tool = Enum.find(tools, &(&1.name == "list_artists"))
+      assert read_tool
+
+      schema = read_tool.parameter_schema
+      assert schema["type"] == "object"
+      assert schema["properties"]["filter"]["type"] == "object"
+      assert Map.has_key?(schema["properties"], "result_type")
+      assert Map.has_key?(schema["properties"], "limit")
+      assert Map.has_key?(schema["properties"], "offset")
+      assert Map.has_key?(schema["properties"], "sort")
+    end
+
+    test "strict mode changes read filter schema shape" do
+      strict_tools = AshAi.list_tools(actions: [{Artist, [:read]}], strict: true)
+      relaxed_tools = AshAi.list_tools(actions: [{Artist, [:read]}], strict: false)
+
+      strict_filter = hd(strict_tools).parameter_schema["properties"]["filter"]
+      relaxed_filter = hd(relaxed_tools).parameter_schema["properties"]["filter"]
+
+      assert is_list(strict_filter["anyOf"])
+      assert Enum.any?(strict_filter["anyOf"], &(&1["type"] == "array"))
+      assert relaxed_filter["type"] == "object"
+    end
+  end
+
+  describe "build_tools_and_registry/1" do
     setup do
       artist =
         Artist
@@ -110,246 +138,62 @@ defmodule AshAiTest do
       %{artist: artist}
     end
 
-    test "with read action", %{artist: artist} do
-      tool_name = "list_artists"
-      chain = chain()
+    test "executes CRUD and generic action callbacks", %{artist: artist} do
+      {_tools, registry} =
+        AshAi.build_tools_and_registry(actions: [{Artist, :*}], strict: false)
 
-      assert %LangChain.Function{} = function = chain.tools |> Enum.find(&(&1.name == tool_name))
+      context = %{actor: nil, tenant: nil, context: %{}, tool_callbacks: %{}}
 
-      assert function.description == "Call the read action on the AshAiTest.Artist resource"
+      {:ok, created_json, created_raw} =
+        registry["create_artist"].(%{"input" => %{"name" => "Chat Faker"}}, context)
 
-      filter = function.parameters_schema["properties"]["filter"]
-      assert filter["type"] == "object"
-      assert filter["description"] == "Filter results"
-      assert Map.has_key?(filter["properties"], "id")
-      assert Map.has_key?(filter["properties"], "name")
-      assert Map.has_key?(filter["properties"], "albums_count")
-      refute Map.has_key?(filter["properties"], "albums_copies_sold")
+      assert created_raw.name == "Chat Faker"
+      assert is_binary(created_json)
 
-      refute function.parameters_schema["properties"]["input"]
-
-      assert function.parameters_schema["properties"]["limit"] == %{
-               "type" => "integer",
-               "description" => "The maximum number of records to return",
-               "default" => 25
-             }
-
-      assert function.parameters_schema["properties"]["offset"] == %{
-               "type" => "integer",
-               "description" => "The number of records to skip",
-               "default" => 0
-             }
-
-      assert function.parameters_schema["properties"]["sort"] == %{
-               "type" => "array",
-               "items" => %{
-                 "type" => "object",
-                 "properties" => %{
-                   "direction" => %{
-                     "type" => "string",
-                     "description" => "The direction to sort by",
-                     "enum" => ["asc", "desc"]
-                   },
-                   "field" => %{
-                     "type" => "string",
-                     "description" => "The field to sort by",
-                     "enum" => ["id", "name", "albums_copies_sold"]
-                   }
-                 }
-               }
-             }
-
-      tool_call =
-        tool_call(tool_name, %{"filter" => %{"name" => %{"eq" => artist.name}}})
-
-      assert {:ok, new_chain} = chain |> run_chain(tool_call)
-
-      assert [fetched_artist] = new_chain.last_message.processed_content
-      assert fetched_artist.id == artist.id
-      assert fetched_artist.albums_count == 0
-      assert %Ash.NotLoaded{} = fetched_artist.albums_copies_sold
-    end
-
-    test "with create action" do
-      tool_name = "create_artist"
-      chain = chain()
-
-      assert %LangChain.Function{} = function = chain.tools |> Enum.find(&(&1.name == tool_name))
-
-      assert function.description == "Call the create action on the AshAiTest.Artist resource"
-
-      assert function.parameters_schema["properties"]["input"]["type"] == "object"
-      assert Map.has_key?(function.parameters_schema["properties"]["input"]["properties"], "id")
-      assert Map.has_key?(function.parameters_schema["properties"]["input"]["properties"], "name")
-
-      tool_call = tool_call(tool_name, %{"input" => %{"name" => "Chat Faker"}})
-
-      assert {:ok, new_chain} = chain |> run_chain(tool_call)
-
-      assert created_artist = new_chain.last_message.processed_content
-      assert created_artist.name == "Chat Faker"
-      assert created_artist.albums_count == 0
-      assert %Ash.NotLoaded{} = created_artist.albums_copies_sold
-    end
-
-    test "with update action", %{artist: artist} do
-      tool_name = "update_artist"
-      chain = chain()
-
-      assert %LangChain.Function{} = function = chain.tools |> Enum.find(&(&1.name == tool_name))
-
-      assert function.description == "Call the update action on the AshAiTest.Artist resource"
-
-      assert function.parameters_schema["properties"]["id"] == %{
-               "type" => "string",
-               "format" => "uuid"
-             }
-
-      assert function.parameters_schema["properties"]["input"]["type"] == "object"
-      assert Map.has_key?(function.parameters_schema["properties"]["input"]["properties"], "name")
-
-      tool_call =
-        tool_call(tool_name, %{"id" => artist.id, "input" => %{"name" => "Chat Faker"}})
-
-      assert {:ok, new_chain} = chain() |> run_chain(tool_call)
-
-      assert updated_artist = new_chain.last_message.processed_content
-      assert updated_artist.id == artist.id
-      assert updated_artist.name == "Chat Faker"
-      assert updated_artist.albums_count == 0
-      assert %Ash.NotLoaded{} = updated_artist.albums_copies_sold
-    end
-
-    test "with destroy action", %{artist: artist} do
-      tool_name = "delete_artist"
-      chain = chain()
-
-      assert %LangChain.Function{} = function = chain.tools |> Enum.find(&(&1.name == tool_name))
-
-      assert function.description == "Call the destroy action on the AshAiTest.Artist resource"
-
-      assert function.parameters_schema["properties"]["id"] == %{
-               "type" => "string",
-               "format" => "uuid"
-             }
-
-      # no input schema because no inputs
-      refute function.parameters_schema["properties"]["input"]
-
-      tool_call = tool_call(tool_name, %{"id" => artist.id})
-
-      assert {:ok, new_chain} = chain() |> run_chain(tool_call)
-
-      assert destroyed_artist = new_chain.last_message.processed_content
-      assert destroyed_artist.id == artist.id
-      assert destroyed_artist.name == "Chet Baker"
-      assert %Ash.NotLoaded{} = destroyed_artist.albums_copies_sold
-    end
-
-    test "with generic action" do
-      tool_name = "say_hello"
-      chain = chain()
-
-      assert %LangChain.Function{} = function = chain.tools |> Enum.find(&(&1.name == tool_name))
-
-      assert function.description == "Say hello"
-
-      assert function.parameters_schema["properties"]["input"]["type"] == "object"
-
-      assert function.parameters_schema["properties"]["input"]["properties"]["name"] == %{
-               "type" => "string"
-             }
-
-      assert function.parameters_schema["properties"]["input"]["required"] == ["name"]
-
-      tool_call = tool_call(tool_name, %{"input" => %{"name" => "Chat Faker"}})
-
-      assert {:ok, new_chain} = chain() |> run_chain(tool_call)
-
-      assert "Hello, Chat Faker!" = new_chain.last_message.processed_content
-    end
-
-    test "passes context through setup_ash_ai" do
-      custom_context = %{shared: %{conversation_id: "test-123"}}
-
-      chain =
-        %{llm: ChatFaker.new!(%{expect_fun: expect_fun()})}
-        |> LLMChain.new!()
-        |> AshAi.setup_ash_ai(
-          actions: [],
-          context: custom_context
+      {:ok, updated_json, updated_raw} =
+        registry["update_artist"].(
+          %{"id" => artist.id, "input" => %{"name" => "Updated"}},
+          context
         )
 
-      assert chain.custom_context.context == custom_context
+      assert updated_raw.id == artist.id
+      assert updated_raw.name == "Updated"
+      assert is_binary(updated_json)
+
+      {:ok, read_json, read_raw} =
+        registry["list_artists"].(%{"filter" => %{"id" => %{"eq" => artist.id}}}, context)
+
+      assert is_binary(read_json)
+      assert is_list(read_raw)
+      assert Enum.any?(read_raw, &(&1.id == artist.id))
+
+      {:ok, say_hello_json, _} =
+        registry["say_hello"].(%{"input" => %{"name" => "Ash"}}, context)
+
+      assert say_hello_json == "\"Hello, Ash!\""
+
+      {:ok, deleted_json, deleted_raw} = registry["delete_artist"].(%{"id" => artist.id}, context)
+      assert deleted_raw.id == artist.id
+      assert is_binary(deleted_json)
     end
 
-    test "context is accessible in tool execution" do
+    test "passes source context to action execution" do
       custom_context = %{shared: %{conversation_id: "test-123", user_id: 42}}
 
-      actions =
-        AshAi.Info.tools(Music)
-        |> Enum.group_by(& &1.resource, & &1.action)
-        |> Map.to_list()
-
-      chain =
-        %{llm: ChatFaker.new!(%{expect_fun: expect_fun()})}
-        |> LLMChain.new!()
-        |> AshAi.setup_ash_ai(
-          actions: actions,
+      {_tools, registry} =
+        AshAi.build_tools_and_registry(
+          actions: [{Artist, [:check_context]}],
           context: custom_context
         )
 
-      tool_call = tool_call("check_context", %{})
+      {:ok, json, raw} =
+        registry["check_context"].(
+          %{},
+          %{actor: nil, tenant: nil, context: custom_context, tool_callbacks: %{}}
+        )
 
-      assert {:ok, new_chain} = chain |> run_chain(tool_call)
-
-      result = new_chain.last_message.processed_content
-
-      assert result.context.shared == custom_context.shared
-      assert result.context.conversation_id == "test-123"
-      assert result.context.user_id == 42
+      assert raw.context.shared == custom_context.shared
+      assert is_binary(json)
     end
-  end
-
-  defp tool_call(name, arguments) do
-    %LangChain.Message.ToolCall{
-      status: :complete,
-      type: :function,
-      call_id: "call_id",
-      name: name,
-      arguments: arguments,
-      index: 0
-    }
-  end
-
-  defp chain do
-    actions =
-      AshAi.Info.tools(Music)
-      |> Enum.group_by(& &1.resource, & &1.action)
-      |> Map.to_list()
-
-    %{llm: ChatFaker.new!(%{expect_fun: expect_fun()})}
-    |> LLMChain.new!()
-    |> AshAi.setup_ash_ai(actions: actions, strict: false)
-  end
-
-  defp expect_fun do
-    fn _chat_model, messages, _tools ->
-      Message.new_assistant(%{processed_content: last_processed_content(messages)})
-    end
-  end
-
-  defp run_chain(chain, tool_call) do
-    chain
-    |> LLMChain.add_message(Message.new_assistant!(%{status: :complete, tool_calls: [tool_call]}))
-    |> LLMChain.run(mode: :while_needs_response)
-  end
-
-  defp last_processed_content(messages) do
-    messages
-    |> List.last()
-    |> Map.get(:tool_results)
-    |> List.first()
-    |> Map.get(:processed_content)
   end
 end

@@ -4,7 +4,7 @@
 
 defmodule AshAi.ToolStartEvent do
   @moduledoc """
-  Event data passed to the `on_tool_start` callback passed to `AshAi.setup_ash_ai/2`.
+  Event data passed to the `on_tool_start` callback used by `AshAi.ToolLoop`.
 
   Contains information about the tool execution that is about to begin.
   """

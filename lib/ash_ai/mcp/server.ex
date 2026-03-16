@@ -334,12 +334,13 @@ defmodule AshAi.Mcp.Server do
           )
           |> tools()
           |> Enum.map(fn %Tool{} = tool ->
-            function = AshAi.Tools.to_function(tool)
+            {req_tool, _callback} =
+              AshAi.Tools.build(tool, strict: Keyword.get(opts, :strict, true))
 
             result = %{
-              "name" => function.name,
-              "description" => function.description,
-              "inputSchema" => function.parameters_schema
+              "name" => req_tool.name,
+              "description" => req_tool.description,
+              "inputSchema" => req_tool.parameter_schema
             }
 
             if Tool.has_meta?(tool) do
